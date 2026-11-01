@@ -144,22 +144,34 @@ class _MembershipRow(Protocol):
 def active_on[R: _MembershipRow](rows: Iterable[R], day: date) -> list[R]:
     """Instruments in the allowlist on `day`.
 
-    An interval is all rows sharing (figi, added_on). It ends at the earliest removed_on
-    among its rows (open if none). Active iff added_on <= day < end. Returns the newest
-    row (highest ULID) of each active interval, one per FIGI.
+    Rows per FIGI are replayed in insertion order (ULID): a row without removed_on opens
+    an interval; a row with removed_on closes the newest open interval with the same
+    added_on (or, if none is open, records a closed interval by itself). Active iff some
+    interval has added_on <= day < end. Returns the opening row of the newest active
+    interval, one per FIGI. Same-day remove + re-add therefore works.
     """
-    intervals: dict[tuple[str, date], list[R]] = {}
+    by_figi: dict[str, list[R]] = {}
     for r in rows:
-        intervals.setdefault((r.figi, r.added_on), []).append(r)
-    active: dict[str, R] = {}
-    for (figi, added_on), group in intervals.items():
-        ends = [r.removed_on for r in group if r.removed_on is not None]
-        end = min(ends) if ends else None
-        if added_on <= day and (end is None or day < end):
-            newest = max(group, key=lambda r: r.id)
-            if figi not in active or newest.id > active[figi].id:
-                active[figi] = newest
-    return sorted(active.values(), key=lambda r: getattr(r, "ticker", r.figi))
+        by_figi.setdefault(r.figi, []).append(r)
+    active: list[R] = []
+    for group in by_figi.values():
+        intervals: list[tuple[date, date | None, R]] = []
+        for r in sorted(group, key=lambda r: r.id):
+            if r.removed_on is None:
+                intervals.append((r.added_on, None, r))
+                continue
+            for i in range(len(intervals) - 1, -1, -1):
+                added_on, end, opener = intervals[i]
+                if end is None and added_on == r.added_on:
+                    intervals[i] = (added_on, r.removed_on, opener)
+                    break
+            else:
+                intervals.append((r.added_on, r.removed_on, r))
+        hits = [opener for added_on, end, opener in intervals
+                if added_on <= day and (end is None or day < end)]
+        if hits:
+            active.append(hits[-1])
+    return sorted(active, key=lambda r: getattr(r, "ticker", r.figi))
 
 
 # ---------- I/O ----------

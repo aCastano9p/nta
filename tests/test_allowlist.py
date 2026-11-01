@@ -134,6 +134,17 @@ def test_active_on_intervals() -> None:
     assert [r.id for r in active_on(rows, date(2026, 6, 2)) if r.figi == "F1"] == ["03"]
 
 
+def test_active_on_same_day_remove_and_readd() -> None:
+    d = date(2026, 11, 1)
+    rows = [
+        R("01", "F1", d),                    # added
+        R("02", "F1", d, removed_on=d),      # removed the same day (empty interval)
+        R("03", "F1", d),                    # re-added the same day
+    ]
+    assert [r.id for r in active_on(rows, d)] == ["03"]
+    assert active_on(rows[:2], d) == []
+
+
 # ---------- with DB ----------
 
 CSV = ("ticker,name,cik\n"
@@ -213,3 +224,14 @@ def test_remove_then_readd(
     assert report.added == ["MSFT"]
     assert "MSFT" in tickers(date(2026, 10, 7))
     assert "MSFT" not in tickers(date(2026, 10, 6))
+
+
+def test_remove_and_readd_same_day(
+    session_factory: sessionmaker[Session], figi_client: OpenFigiClient, session: Session
+) -> None:
+    allowlist.load(session_factory, CSV, figi_client, D)
+    assert allowlist.remove(session_factory, "AAPL", D)
+    assert "AAPL" not in [i.ticker for i in allowlist.current(session, D)]
+    report = allowlist.load(session_factory, CSV, figi_client, D)
+    assert report.added == ["AAPL"]
+    assert "AAPL" in [i.ticker for i in allowlist.current(session, D)]
