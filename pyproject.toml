@@ -1,0 +1,31 @@
+[project]
+name = "nta"
+version = "0.0.1"
+description = "NTA phase 0: measure price moves after material SEC 8-K filings"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.9",
+    "httpx>=0.27",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14",
+    "typer>=0.15",
+    "psycopg[binary]>=3.2",
+    "pandas-market-calendars>=4.4",
+]
+
+[project.scripts]
+nta = "nta.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nta"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

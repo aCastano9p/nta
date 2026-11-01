@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: nta
+      POSTGRES_PASSWORD: nta
+      POSTGRES_DB: nta
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - nta_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nta -d nta"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  nta_pgdata:
