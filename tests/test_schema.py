@@ -1,4 +1,5 @@
 import re
+import time
 
 import pytest
 from sqlalchemy import Connection, text
@@ -63,3 +64,11 @@ def test_ulid_shape_and_ordering() -> None:
     assert re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", a)
     assert a < b
     assert len({new_ulid() for _ in range(1000)}) == 1000
+
+
+def test_ulid_is_monotonic_within_a_millisecond() -> None:
+    now_ms = int(time.time() * 1000)
+    ids = [new_ulid(now_ms=now_ms) for _ in range(10_000)]
+    assert ids == sorted(ids) and len(set(ids)) == len(ids)
+    fast = [new_ulid() for _ in range(10_000)]
+    assert fast == sorted(fast)

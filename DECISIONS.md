@@ -5,7 +5,7 @@ Choices the brief left open. Newest at the bottom of each section.
 ## Tooling
 - **Postgres port 55432** on 127.0.0.1 (5432/5433 were taken on the dev machine).
 - **Driver: psycopg 3** (`psycopg[binary]`). A DB driver is required by SQLAlchemy; not a framework.
-- **ULIDs generated in-process** (`nta/ids.py`, ~15 lines, stdlib) instead of adding a ULID library.
+- **ULIDs generated in-process** (`nta/ids.py`, stdlib) instead of adding a ULID library. **Monotonic within a process**: IDs created in the same millisecond increment the random part, so id order = insertion order (allowlist replay depends on it; found via a flaky test).
 - **Tests use a separate `nta_test` database**, dropped and rebuilt with `alembic upgrade head` once per pytest session, so the migration is tested too. Each test runs in a rolled-back transaction (rollback is not DELETE, so append-only still holds).
 
 ## Schema
