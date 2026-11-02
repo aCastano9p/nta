@@ -68,6 +68,90 @@ uv run nta dashboard --demo     # rebuilds the separate nta_demo database with s
 ```
 Read-only. Shows process status (from the two `/healthz` endpoints), market status, the provisional verdict with its two thresholds, filings per day, poll latency, every filing with its observe/1h/1d/5d status, the quote schedule, process runs (crashes are flagged "no clean stop") and the allowlist. Click a ticker for the filing detail page (quotes, label, text preview). `/verdict` shows the full report; `/verdict.csv` downloads the per-filing table. Stop with Ctrl-C. Options: `--port`, `--poller-health`, `--quotes-health`.
 
+## Phase 1: decision loop on paper accounts
+
+### Credentials (once)
+Two **separate Alpaca paper accounts**: D (data; the phase 0 `ALPACA_KEY_ID` / `ALPACA_SECRET`) and T (trading; `ALPACA_TRADING_KEY_ID` / `ALPACA_TRADING_SECRET`). Account T must be flat and used by nothing but NTA, or the reconciler pauses trading. Add to `.env`:
+```sh
+ANTHROPIC_API_KEY=...            # agent and evaluate only
+ALPACA_TRADING_KEY_ID=...        # risk only
+ALPACA_TRADING_SECRET=...
+RISK_SIGNING_KEY=$(openssl rand -hex 32)   # paste the value; risk only
+```
+Never run `nta agent` from a shell that has the trading keys or the signing key, nor `nta risk` from a shell with any `ANTHROPIC_*` variable: each refuses to start (exit 2). With docker compose this split is automatic.
+
+### Start / stop (docker compose)
+```sh
+NTA_CODE_SHA=$(git rev-parse HEAD) docker compose --profile app up -d --build   # db, migrate, poller, quotes, agent, risk
+docker compose --profile app ps                       # health column
+docker compose --profile app logs -f agent risk       # JSON lines
+docker compose --profile app stop agent               # graceful (SIGTERM, up to 75 s)
+docker compose --profile app down                     # stop everything (data stays in the volume)
+```
+`docker compose up -d` without the profile starts only Postgres (what the tests need). Health endpoints are published on the host's 127.0.0.1: poller 8765, quotes 8766, agent 8767, risk 8768. A process missing its credentials exits 2 and compose restarts it in a loop; `docker compose logs <service>` shows the `error:` line.
+
+### Start / stop (host, for development)
+```sh
+# agent shell: only data keys + LLM key
+env -u ALPACA_TRADING_KEY_ID -u ALPACA_TRADING_SECRET -u RISK_SIGNING_KEY uv run nta agent | tee -a logs/agent.jsonl
+# risk shell: trading keys, no LLM key
+env -u ANTHROPIC_API_KEY uv run nta risk | tee -a logs/risk.jsonl
+```
+Stop with Ctrl-C / SIGTERM like the phase 0 processes. Restarts are safe: the agent decides any signal left undecided; risk reconciles before sending anything and looks every pending order up by `client_order_id` before (re)sending.
+
+Startup order does not matter. Until risk has written its first account T snapshot, the agent's decisions `wait` with `no_equity`. Both processes read `policy/policy.yaml` once at startup; after editing it, restart **both** (risk rejects decisions made under another policy version with `policy_mismatch`).
+
+### What to watch
+- Agent: `signal_written`, `decision_written` (`outcome`, `reasons`, `decide_latency_s`), `llm_call`, `llm_budget_hit`. `curl -s localhost:8767/healthz`.
+- Risk: `reconciled` every 30 s, `risk_review`, `order_event` (`step`), `fill`, `incident`. `curl -s localhost:8768/healthz` (503 while any incident is open).
+- Dashboard: `uv run nta dashboard` → `/loop`, `/decisions`, `/orders`, `/positions`, `/incidents`, `/spend`.
+
+### Kill switch (humans only)
+```sh
+uv run nta kill status
+uv run nta kill pause   -r "why"   # no new entries; stops, take-profits and expiries still close positions
+uv run nta kill flatten -r "why"   # no entries; risk writes a close decision for every open position
+uv run nta kill halt    -r "why"   # nothing is sent, not even closes; open orders are cancelled every tick
+uv run nta kill resume  -r "why"   # lists open incidents, asks you to type RESUME; closes all open incidents
+```
+Processes only ever set PAUSE. After FLATTEN has closed everything, stay in FLATTEN or PAUSE until you resume. HALT leaves positions unmanaged: use it when orders themselves are the problem, and switch to FLATTEN or PAUSE once that is understood.
+
+### Incidents
+Each sets PAUSE (except where noted) and stays open, shown on risk's `/healthz` and `/incidents`, until `nta kill resume`.
+
+| Kind (severity) | Meaning | Action |
+|---|---|---|
+| `reconcile_mismatch` (2) | Account T positions or open orders differ from the log (`detail` lists symbols with broker vs log qty, and unknown order ids). | Look at account T in Alpaca's paper dashboard. If someone traded T by hand, close that position by hand. If a fill was missed, it will be recorded on the next sync; check `/positions` shows "match", then resume. |
+| `account_d_activity` (1) | Account D (data keys) shows an order or position. The data keys were used to trade. | Treat the D keys as compromised: rotate them (below), cancel/close in account D by hand, find out who used them. Resume only after D is empty. |
+| `hmac_invalid` (1) | An order row with a bad signature was found; it was not sent. | Someone or something wrote to `orders` without the signing key, or the key changed under a running process. Inspect the row (`select * from orders where id = ...`), check DB access, then resume. |
+| `order_without_trade_decision` (1) | A signed order points at a decision that is not a trade. Not sent. | A bug or tampering; inspect before resuming. |
+| `drawdown_pause` (2) | Equity is 5 % or more below its peak snapshot. | Review recent trades (`/decisions`, `nta evaluate`) before resuming; consider a policy change. |
+| `order_missing_at_broker` (2) | A sent order is not found by its `client_order_id`. | Check Alpaca's order list; if it is really gone, the order's last event stays as is and the position manager will retry closes; resume after `/positions` matches. |
+
+### Evaluation
+```sh
+uv run nta evaluate            # after positions close / horizons pass; idempotent
+uv run nta label --review      # grade a 20 % sample + every decision with a zero; q to stop, rerun to resume
+```
+Needs agent-side credentials (account D for SPY bars, the LLM key for grading; `--no-grade` skips the LLM). Proposals appear in `guardrail_proposals`; they never change the policy.
+
+### Replay
+```sh
+uv run nta replay --from 2026-11-04 --to 2026-11-04                        # exit 1 if any decision differs from live
+uv run nta replay --from 2026-11-02 --to 2026-11-06 --policy my_policy.yaml  # two simulated portfolio paths
+```
+Writes only to new schemas `replay_<run_id>`; drop old ones with `DROP SCHEMA replay_... CASCADE`. Never calls the LLM: `CacheMiss` means an event in the window was never processed live (e.g. the agent was down or the event was older than its 24 h lookback).
+
+### X ingestion (optional)
+Add accounts to `sources.yaml` (numeric author id, approved handle and display name), set `X_ENABLED=true`, `X_BEARER_TOKEN`, `X_DAILY_USD` (default 3), then `uv run nta poll x` (health :8769). Restart `nta agent` after editing `sources.yaml`. A quarantined account (changed handle or name) shows `source_quarantined` on its signals: verify the account, then update `sources.yaml`.
+
+### Rotating keys
+- **Anthropic key:** create a new key, update `.env`, `docker compose --profile app up -d agent` (or restart `nta agent` / `nta evaluate`), revoke the old key. Cached answers stay valid.
+- **Alpaca account D:** regenerate in the paper dashboard of account D, update `ALPACA_KEY_ID` / `ALPACA_SECRET`, restart `quotes`, `agent` and `risk` (the watchdog uses them).
+- **Alpaca account T:** `nta kill pause -r "rotating T keys"`, wait for working orders to finish, regenerate, update `ALPACA_TRADING_*`, restart `risk`, check `reconciled` with no mismatch, `nta kill resume`.
+- **`RISK_SIGNING_KEY`:** `nta kill pause`, wait until `/orders` shows no unsent orders (an unsent order signed with the old key would raise `hmac_invalid` after the change), set the new key, restart `risk` (it writes a newly signed `policy_versions` row), `nta kill resume`.
+- **X bearer token:** update `X_BEARER_TOKEN`, restart `nta poll x`.
+
 ## Tests
 ```sh
 docker compose up -d
@@ -96,6 +180,23 @@ uv run pytest -q              # rebuilds the nta_test database from migrations e
 | `quotes_tick_failed` | A tick failed (Alpaca down, bad keys -> 401/403, DB down). | Ticks continue every 0.5 s; `/healthz` on 8766 turns 503 after 30 s. A 401/403 means wrong keys. |
 | Dashboard shows an error page (500) | A rendering bug; the server keeps running. | The page shows the exception text; report it. Other pages still work. |
 | `nta db check` exits 1 | Migrations not applied. | `uv run nta db upgrade`. |
+| `error: nta agent refuses to start: trading credentials in its environment` / `nta risk refuses to start: LLM credentials` (exit 2) | Credential split violated. | Remove the named variables from that process's environment (see "Start / stop (host)"). |
+| `error: account T and account D must be different paper accounts` (exit 2) | `ALPACA_TRADING_KEY_ID` equals `ALPACA_KEY_ID`. | Use a second paper account for T. |
+| `error: RISK_SIGNING_KEY must be set` / `ANTHROPIC_API_KEY must be set` (exit 2) | Missing secret. | Set it in `.env`. |
+| `llm_budget_hit` | `LLM_DAILY_USD` spent since New York midnight; new items are abstained with `llm_budget`. | Expected on a busy day; raise the cap if the spend is worth it. Check `/spend`. |
+| `llm_call` with `status: error` | Anthropic API failed after the SDK's retries; stored, signal abstained `llm_error`. | Transient: nothing. Repeated: check the key, network, status page. |
+| `llm_call` with `status: invalid` | Output failed schema validation (or refusal / max_tokens); signal abstained `llm_invalid`. | Occasional is fine. Many in a row: look at `llm_calls.response` for the pattern. |
+| `agent_tick_failed` / `risk_tick_failed` | A tick raised (DB down, Alpaca error, bug). | Ticks continue; `/healthz` turns 503 when stale. Read the error. |
+| `quote_missing` (agent) | No snapshot for the symbol; the decision waits with `quote_missing`. | Check the symbol on IEX. |
+| `reconcile_failed` | Account T unreachable or keys wrong. Before the first success nothing is sent. | Check keys / Alpaca status. |
+| `watchdog_failed` | Account D unreachable from risk. | Check D keys. |
+| `order_event` `submit_timeout` | Broker did not answer the order POST and the lookup did not find it. | Automatic: next tick looks up again before resending. |
+| `order_event` `broker_rejected` | Alpaca refused the order (buying power, halted symbol, bad price). Final. | Read `detail.body`; a rejected close is retried by the position manager after 60 s. |
+| `order_event` `blocked` | Kill switch blocked an unsent order. Final. | Expected under PAUSE/FLATTEN (entries) and HALT (everything). |
+| `risk_review` with `policy_mismatch` | Agent and risk run different policy files. | Restart both after a policy edit. |
+| `risk_review` with `decision_stale` | Risk saw an entry more than 30 s after it was decided (risk was down or slow). | Check risk's uptime; nothing to do for that decision. |
+| `x_budget_hit` / `x_poll_failed` | X daily cap reached / X API error. | Cap: polling resumes after New York midnight. Error 401: token; 429: wait. |
+| `CacheMiss` from `nta replay` | An event in the window has no recorded model answer. | Narrow the window, or accept that those events were never processed live. |
 
 ## Dev reset (destroys all data)
 Append-only means rows cannot be deleted. To wipe a dev database: `uv run alembic downgrade base && uv run nta db upgrade`, or `docker compose down -v`.
