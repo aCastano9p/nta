@@ -16,7 +16,12 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def code_sha(repo: Path = ROOT) -> str:
-    """HEAD commit, suffixed with -dirty if the working tree has uncommitted changes."""
+    """HEAD commit, suffixed with -dirty if the working tree has uncommitted changes.
+    Inside the container image (no .git) the build sets NTA_CODE_SHA instead."""
+    import os
+
+    if os.environ.get("NTA_CODE_SHA", "unknown") != "unknown":
+        return os.environ["NTA_CODE_SHA"]
     try:
         sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
                              text=True, check=True, timeout=5).stdout.strip()

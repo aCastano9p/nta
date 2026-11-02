@@ -1,3 +1,21 @@
+# `docker compose up -d` starts Postgres only (what the tests need).
+# `docker compose --profile app up -d --build` also starts the four NTA processes.
+# Each service gets only the variables listed under its `environment` (values come from
+# .env through interpolation; no service uses env_file). nta agent never sees trading
+# credentials; nta risk never sees an LLM key.
+x-app: &app
+  build:
+    context: .
+    args:
+      NTA_CODE_SHA: ${NTA_CODE_SHA:-unknown}
+  image: nta:latest
+  profiles: ["app"]
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  stop_grace_period: 75s
+
 services:
   db:
     image: postgres:16
@@ -14,6 +32,71 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+  migrate:
+    <<: *app
+    restart: "no"
+    command: ["db", "upgrade"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg://nta:nta@db:5432/nta
+
+  poller:
+    <<: *app
+    command: ["poll", "edgar"]
+    ports: ["127.0.0.1:8765:8765"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nta:nta@db:5432/nta
+      SEC_USER_AGENT: ${SEC_USER_AGENT}
+      HP: "8765"
+    healthcheck: &health
+      test: ["CMD", "python", "-c", "import os,urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ['HP'] + '/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+
+  quotes:
+    <<: *app
+    command: ["quotes"]
+    ports: ["127.0.0.1:8766:8766"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nta:nta@db:5432/nta
+      ALPACA_KEY_ID: ${ALPACA_KEY_ID}          # account D (data)
+      ALPACA_SECRET: ${ALPACA_SECRET}
+      HP: "8766"
+    healthcheck: *health
+
+  agent:
+    <<: *app
+    command: ["agent"]
+    ports: ["127.0.0.1:8767:8767"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nta:nta@db:5432/nta
+      ALPACA_KEY_ID: ${ALPACA_KEY_ID}          # account D (data only)
+      ALPACA_SECRET: ${ALPACA_SECRET}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_DAILY_USD: ${LLM_DAILY_USD:-5}
+      LLM_TRIAGE_MODEL: ${LLM_TRIAGE_MODEL:-claude-haiku-5-5}
+      LLM_EXTRACT_MODEL: ${LLM_EXTRACT_MODEL:-claude-sonnet-5-5}
+      HP: "8767"
+    healthcheck: *health
+
+  risk:
+    <<: *app
+    command: ["risk"]
+    ports: ["127.0.0.1:8768:8768"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://nta:nta@db:5432/nta
+      ALPACA_TRADING_KEY_ID: ${ALPACA_TRADING_KEY_ID}   # account T (paper trading)
+      ALPACA_TRADING_SECRET: ${ALPACA_TRADING_SECRET}
+      RISK_SIGNING_KEY: ${RISK_SIGNING_KEY}
+      ALPACA_KEY_ID: ${ALPACA_KEY_ID}          # account D, read-only use by the watchdog
+      ALPACA_SECRET: ${ALPACA_SECRET}
+      HP: "8768"
+    healthcheck: *health
 
 volumes:
   nta_pgdata:

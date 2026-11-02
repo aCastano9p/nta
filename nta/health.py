@@ -11,8 +11,13 @@ class HealthServer:
     """GET /healthz returns the status dict as JSON: 200 if the last success is fresher
     than stale_after_s, else 503 (including "never succeeded yet")."""
 
-    def __init__(self, status: Callable[[], dict[str, Any]], host: str = "127.0.0.1",
+    def __init__(self, status: Callable[[], dict[str, Any]], host: str | None = None,
                  port: int = 8765, stale_after_s: float = 60.0) -> None:
+        # 127.0.0.1 by default; the container image sets NTA_HEALTH_HOST=0.0.0.0 so that
+        # docker-compose can publish the port (again only on the host's 127.0.0.1).
+        import os
+
+        host = host or os.environ.get("NTA_HEALTH_HOST", "127.0.0.1")
         self._status = status
         self._stale_after_s = stale_after_s
         outer = self
