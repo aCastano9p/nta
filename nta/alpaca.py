@@ -81,7 +81,11 @@ def alpaca_symbol(ticker: str) -> str:
 
 class AlpacaData:
     def __init__(self, http: httpx.Client, bucket: TokenBucket, clock: Clock,
-                 key_id: str, secret: str, base_url: str = ALPACA_DATA_URL) -> None:
+                 key_id: str, secret: str, base_url: str = ALPACA_DATA_URL, feed: str = FEED) -> None:
+        if feed not in ("iex", "sip"):
+            raise ConfigError(f"unknown Alpaca feed {feed!r}")
+        self.feed = feed
+        self.source = f"alpaca_{feed}"
         parsed = urlparse(base_url)
         if parsed.scheme != "https" or parsed.hostname != ALLOWED_HOST:
             raise ConfigError(f"Alpaca base URL must be https://{ALLOWED_HOST} (data API only)")
@@ -94,7 +98,7 @@ class AlpacaData:
     def _fetch(self, chunk: list[str]) -> dict[str, Snapshot]:
         req = self._http.build_request(
             "GET", f"{self._base}/v2/stocks/snapshots",
-            params={"symbols": ",".join(chunk), "feed": FEED}, headers=self._headers)
+            params={"symbols": ",".join(chunk), "feed": self.feed}, headers=self._headers)
         with self._count_lock:
             self.requests += 1
         resp = send_with_retry(self._http, req, bucket=self._bucket, clock=self._clock,

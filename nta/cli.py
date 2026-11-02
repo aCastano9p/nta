@@ -223,6 +223,75 @@ def quotes_cmd(
         stop_run(sf, run_id, stop.reason, clock)
 
 
+@app.command("agent")
+def agent_cmd(
+    tick: float = typer.Option(1.0, help="Seconds between ticks."),
+    health_port: int = typer.Option(8767, help="Port for GET /healthz on 127.0.0.1."),
+    stale_after: float = typer.Option(60.0, help="/healthz returns 503 after this many seconds without a successful tick."),
+    lookback_h: float = typer.Option(24.0, help="Only source events first observed within this many hours are processed."),
+    policy_path: Path = typer.Option(None, "--policy", help="Policy file (default policy/policy.yaml)."),
+    once: bool = typer.Option(False, help="Run one tick and exit (for checks)."),
+) -> None:
+    """Extract, cluster and decide on new filings; manage open positions. Never trades."""
+    from datetime import timedelta
+
+    import httpx
+
+    from nta.agent import AgentProcess, LiveQuotes, Pipeline
+    from nta.alpaca import AlpacaData
+    from nta.clock import SystemClock
+    from nta.config import ConfigError, alpaca_credentials, anthropic_api_key, assert_agent_env
+    from nta.db import make_engine, make_session_factory
+    from nta.extract import AnthropicBackend, LlmGateway, daily_usd_from_env, model_config_from_env
+    from nta.health import HealthServer
+    from nta.logs import log
+    from nta.policy import DEFAULT_POLICY_PATH, load_policy, record_policy_version
+    from nta.ratelimit import alpaca_bucket
+    from nta.runs import code_sha, start_run, stop_run
+    from nta.shutdown import StopFlag, install_signal_handlers
+
+    try:
+        assert_agent_env()  # first: refuse before reading any other credential
+        key, secret = alpaca_credentials()
+        llm_key = anthropic_api_key()
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    clock = SystemClock()
+    sf = make_session_factory(make_engine())
+    loaded = load_policy(policy_path or DEFAULT_POLICY_PATH)
+    models = model_config_from_env()
+    config = {"process": "agent", "tick_s": tick, "lookback_h": lookback_h, "policy_version": loaded.hash,
+              "models": models.model_id, "prompts": models.prompt_version, "feed": loaded.policy.quote_source}
+    run_id = start_run(sf, "agent", config, clock)
+    record_policy_version(sf, loaded, process="agent", run_id=run_id)
+    stop = StopFlag()
+    install_signal_handlers(stop)
+    health = None
+    try:
+        with httpx.Client(timeout=httpx.Timeout(5.0, connect=3.0)) as http:
+            alpaca = AlpacaData(http, alpaca_bucket(clock), clock, key, secret, feed=loaded.policy.quote_source)
+            gateway = LlmGateway(sf, clock, backend=AnthropicBackend(llm_key), daily_usd=daily_usd_from_env())
+            quotes = LiveQuotes(sf, alpaca, clock)
+            pipeline = Pipeline(sf=sf, clock=clock, gateway=gateway, models=models, policy=loaded, quotes=quotes,
+                                code_sha=code_sha())
+            proc = AgentProcess(pipeline, clock, run_id=run_id, lookback=timedelta(hours=lookback_h))
+            if once:
+                proc.tick()
+            else:
+                health = HealthServer(proc.health, port=health_port, stale_after_s=stale_after).start()
+                log("healthz_listening", url=f"http://127.0.0.1:{health.port}/healthz")
+                proc.run(stop, tick_s=tick)
+    except BaseException as exc:
+        stop.set(f"error {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if health:
+            health.stop()
+        stop_run(sf, run_id, stop.reason, clock)
+
+
 @app.command("label")
 def label_cmd(
     seed: int = typer.Option(7, help="Sampling seed. Keep it fixed so sessions resume in the same order."),

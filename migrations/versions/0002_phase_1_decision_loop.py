@@ -133,6 +133,7 @@ def upgrade() -> None:
     sa.Column('triage_call_id', sa.String(length=26), nullable=True),
     sa.Column('extract_call_id', sa.String(length=26), nullable=True),
     sa.Column('extraction', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('flags', postgresql.JSONB(astext_type=sa.Text()), server_default='[]', nullable=False),
     sa.Column('ready_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('id', sa.String(length=26), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),

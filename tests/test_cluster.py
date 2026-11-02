@@ -94,10 +94,10 @@ def test_load_members_finds_same_instrument_and_cited_filings(session) -> None:
     rows = one_of_each(session)
     ev, inst, sig = rows["source_events"], rows["instruments"], rows["signals"]
     by_instrument = load_members(session, inst.id, [], sig.ready_at - W, sig.ready_at)
-    assert [m.signal_id for m in by_instrument] == [sig.id]
+    assert [m.event_id for m in by_instrument] == [ev.id]
     assert by_instrument[0].accession == ev.external_id and by_instrument[0].minhash == (1, 2)
     by_citation = load_members(session, None, [ev.external_id], sig.ready_at - W, sig.ready_at)
-    assert [m.signal_id for m in by_citation] == [sig.id]
+    assert [m.event_id for m in by_citation] == [ev.id]
     assert load_members(session, "OTHER", [], sig.ready_at - W, sig.ready_at) == []
     assert load_members(session, None, [], sig.ready_at - W, sig.ready_at) == []
     assert load_members(session, inst.id, [], sig.ready_at + timedelta(seconds=1), sig.ready_at + W) == []

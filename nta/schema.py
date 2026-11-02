@@ -285,7 +285,7 @@ class Signal(_Row, Base):
     headline: Mapped[str] = mapped_column(Text, nullable=False)  # normalized; untrusted free text
     minhash: Mapped[list] = mapped_column(JSONB, nullable=False)
     event_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    cluster_id: Mapped[str] = mapped_column(String(26), nullable=False)  # id of the cluster's first signal
+    cluster_id: Mapped[str] = mapped_column(String(26), nullable=False)  # source_event id of the cluster's first member
     is_repeat: Mapped[bool] = mapped_column(Boolean, nullable=False)
     corroboration: Mapped[int] = mapped_column(Integer, nullable=False)  # distinct origins in cluster
     corroborated: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -293,6 +293,7 @@ class Signal(_Row, Base):
     triage_call_id: Mapped[str | None] = mapped_column(ForeignKey("llm_calls.id"))
     extract_call_id: Mapped[str | None] = mapped_column(ForeignKey("llm_calls.id"))
     extraction: Mapped[dict | None] = mapped_column(JSONB_NULL)  # validated model output; contains free text
+    flags: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")  # e.g. injection_suspected
     ready_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     __table_args__ = (Index("ix_signals_cluster", "cluster_id"),
                       Index("ix_signals_instrument_ready", "instrument_id", "ready_at"))

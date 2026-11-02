@@ -7,6 +7,9 @@ and instrument and a MinHash similarity at or above the threshold. Joining marks
 repeat. Corroboration counts distinct origins in the cluster; a cluster containing a
 primary source (every EDGAR filing) is corroborated by definition.
 
+Members are identified by their source_event id, and cluster_id is the source_event id of
+the cluster's first member: source events are inputs, so ids stay the same in replay.
+
 Everything here is pure except load_candidates, which reads prior signals.
 """
 
@@ -68,6 +71,22 @@ def cited_accessions(text: str) -> set[str]:
     return found
 
 
+_INJECTION_RES = [re.compile(p, re.I) for p in (
+    r"\b(ignore|disregard|forget)\b.{0,30}\b(previous|prior|above|earlier|all)\b.{0,20}\b(instructions?|prompts?|rules)\b",
+    r"\byou are now\b",
+    r"\b(system|developer) (prompt|message|instructions?)\b",
+    r"\bnew instructions?\b",
+    r"\bas an ai\b",
+    r"</?\s*untrusted_item",
+)]
+
+
+def injection_suspected(text: str) -> bool:
+    """Instruction-like text addressed to a model. Deterministic, so live and replay agree;
+    a flagged signal never trades, whatever the model answered."""
+    return any(r.search(text) for r in _INJECTION_RES)
+
+
 def edgar_headline(company: str, form_type: str, items: Iterable[str], titles: dict[str, str]) -> str:
     items = list(items)
     parts = [company, form_type, "items"] + [f"{i} {titles.get(i, '')}".strip() for i in items]
@@ -77,7 +96,7 @@ def edgar_headline(company: str, form_type: str, items: Iterable[str], titles: d
 @dataclass(frozen=True)
 class Member:
     """A prior signal, as clustering sees it."""
-    signal_id: str
+    event_id: str           # source_events.id
     cluster_id: str
     event_type: str
     instrument_id: str | None
@@ -91,7 +110,7 @@ class Member:
 
 @dataclass(frozen=True)
 class Candidate:
-    signal_id: str
+    event_id: str           # source_events.id
     event_type: str
     instrument_id: str | None
     minhash: tuple[int, ...]
@@ -113,7 +132,7 @@ class Assignment:
 def assign(c: Candidate, prior: Iterable[Member], *, window: timedelta, threshold: float,
            min_origins: int, min_weight: Decimal) -> Assignment:
     recent = sorted((m for m in prior if c.ready_at - window <= m.ready_at <= c.ready_at),
-                    key=lambda m: (m.ready_at, m.signal_id))
+                    key=lambda m: (m.ready_at, m.event_id))
     cluster_id = None
     for m in recent:  # citing an origin wins over text similarity
         if m.accession in c.cites:
@@ -127,7 +146,7 @@ def assign(c: Candidate, prior: Iterable[Member], *, window: timedelta, threshol
                 cluster_id = m.cluster_id
                 break
     is_repeat = cluster_id is not None
-    cluster_id = cluster_id or c.signal_id
+    cluster_id = cluster_id or c.event_id
     members = [m for m in recent if m.cluster_id == cluster_id]
     weights: dict[str, Decimal] = {c.origin: c.weight}
     classes = {c.source_class}
@@ -151,7 +170,7 @@ def load_members(s: Session, instrument_id: str | None, cites: Iterable[str], si
     if not conds:
         return []
     rows = s.execute(
-        select(Signal.id, Signal.cluster_id, Signal.event_type, Signal.instrument_id, Signal.minhash,
+        select(Signal.source_event_id, Signal.cluster_id, Signal.event_type, Signal.instrument_id, Signal.minhash,
                Signal.origin, Signal.source_class, Signal.source_weight, SourceEvent.external_id,
                Signal.ready_at)
         .join(SourceEvent, SourceEvent.id == Signal.source_event_id)
