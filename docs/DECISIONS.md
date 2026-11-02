@@ -97,3 +97,17 @@ Choices the brief left open. Newest at the bottom of each section.
 ## Throughput (2026-11-02)
 - **Alpaca snapshot chunks (100 symbols each) are fetched concurrently**, up to 5 at a time, so a 500-ticker periodic quote is one round trip instead of five sequential ones and cannot delay observe quotes. The shared token bucket still caps the rate; a failed chunk fails the whole call, which is retried on the next tick.
 - **OpenFIGI is not parallelized:** its limit is on requests per minute, so concurrent requests would only produce 429s. Instead, an **optional `OPENFIGI_API_KEY`** (free) raises the limits from 25 req/min of 10 tickers to 250 req/min (confirmed from the `ratelimit-policy: 250;w=60` header on 2026-11-02) of 100 tickers. Bucket 5 + 20 per 6 s, so at most 205 requests in any 60 s window. Without the key nothing changes. Answers are cached, so this only matters for the first load of a large allowlist.
+
+# Phase 1 (decision loop on a paper account)
+
+Spec: [phase1-brief.md](phase1-brief.md). Same rules as above: newest at the bottom of each section.
+
+## Phase 1 schema (migration 0002)
+- **Tables beyond the brief's list:** `risk_reviews` (exactly one per trade decision: nta risk's approve/reject with its own quote, so a risk rejection leaves a row and no order), `grades` (rubric scores, `grader` = llm | human, latest per grader wins), `estimates` (the estimate ledger, kept apart from real P&L).
+- **Quote kinds `decision` and `manage`** added to `quotes.kind`. Every quote the agent acts on (entry decision, position-manager check) is stored like any outside data, so replay can use exactly what live saw. The verdict reads only observe/mark kinds of EDGAR events, so it is unaffected.
+- **`decisions` holds no free text** (reasons are codes; quote, exposure and plan are numbers). nta risk may therefore read any decisions column. Free text (headline, thesis, contrary evidence) lives in `signals.extraction` / `signals.headline` and `llm_calls`.
+- **One entry decision per signal** is a partial unique index (`signal_id WHERE kind = 'entry'`). Close decisions point at their entry through `parent_decision_id`; a failed close may be followed by another close decision.
+- **A trade decision must be complete** (side, qty > 0, plan) by check constraint, so "the row is complete before anything reads it" holds at the DB level.
+- **Incidents have no resolved flag.** An incident is open until the next human `resume` (a `RUN` row in `kill_switch_events` after it). Append-only rules out flipping a flag.
+- **`fills` are one row per increase of an order's cumulative filled quantity**, unique on `(order_id, cum_qty)`, so re-polling an order can never double-count a fill.
+- **Nullable JSONB columns store SQL NULL for Python `None`** (`JSONB(none_as_null=True)`); plain JSONB writes JSON `null`, which silently passed an `IS NOT NULL` check in the first test run.

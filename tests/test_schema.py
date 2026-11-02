@@ -72,3 +72,47 @@ def test_ulid_is_monotonic_within_a_millisecond() -> None:
     assert ids == sorted(ids) and len(set(ids)) == len(ids)
     fast = [new_ulid() for _ in range(10_000)]
     assert fast == sorted(fast)
+
+
+# ---------- phase 1 constraints ----------
+
+def _flush_fails(session: Session, row: object) -> None:
+    with pytest.raises(IntegrityError):
+        with session.begin_nested():
+            session.add(row)
+            session.flush()
+
+
+def test_new_quote_kinds_are_accepted(session: Session) -> None:
+    from nta.schema import Quote, QuoteKind
+    rows = one_of_each(session)
+    for kind in (QuoteKind.decision, QuoteKind.manage):
+        session.add(Quote(instrument_id=rows["instruments"].id, source_event_id=rows["source_events"].id,
+                          ts=rows["quotes"].ts, first_observed_at=rows["quotes"].ts, last=1,
+                          source="alpaca_iex", kind=kind))
+    session.flush()
+
+
+def test_one_entry_decision_per_signal(session: Session) -> None:
+    from nta.schema import Decision
+    dec = one_of_each(session)["decisions"]
+    copy = Decision(**{c.name: getattr(dec, c.name) for c in Decision.__table__.columns
+                       if c.name not in ("id", "created_at")})
+    _flush_fails(session, copy)
+
+
+def test_trade_decision_needs_side_qty_and_plan(session: Session) -> None:
+    from nta.schema import Decision
+    dec = one_of_each(session)["decisions"]
+    fields = {c.name: getattr(dec, c.name) for c in Decision.__table__.columns
+              if c.name not in ("id", "created_at", "signal_id")}
+    fields.update(kind="close", parent_decision_id=dec.id, plan=None)
+    _flush_fails(session, Decision(**fields))
+
+
+def test_client_order_id_is_unique(session: Session) -> None:
+    from nta.schema import Order
+    o = one_of_each(session)["orders"]
+    _flush_fails(session, Order(decision_id=o.decision_id, leg=2, client_order_id=o.client_order_id,
+                                symbol="AAPL", side="buy", qty=1, limit_price=1, hmac="x" * 64,
+                                policy_version="p" * 64))
