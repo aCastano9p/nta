@@ -45,7 +45,8 @@ class HealthServer:
         body = dict(self._status())
         since = body.get("seconds_since_last_success")
         body["stale_after_s"] = self._stale_after_s
-        body["ok"] = since is not None and since <= self._stale_after_s
+        # A process can also report itself unhealthy (e.g. nta risk with an open incident).
+        body["ok"] = since is not None and since <= self._stale_after_s and not body.get("unhealthy", False)
         return body
 
     def start(self) -> "HealthServer":

@@ -88,6 +88,11 @@ DECISION_COLUMNS = (Decision.id, Decision.kind, Decision.parent_decision_id, Dec
                     Decision.plan, Decision.decided_at, Decision.policy_version)
 
 
+def qty_str(v: Decimal | int) -> str:
+    """49.000000 -> '49', 0.5 -> '0.5'."""
+    return format(Decimal(v).normalize(), "f")
+
+
 def _d(row) -> DecisionRow:  # noqa: ANN001
     return DecisionRow(*row)
 
@@ -145,6 +150,7 @@ class RiskService:
         self._fault = fault or (lambda point: None)
         self._lock = threading.Lock()
         self._last_reconcile: float | None = None
+        self._last_watchdog: float | None = None
         self.reconciled_once = False
         self.ticks_ok = self.ticks_failed = 0
         self.last_success_monotonic: float | None = None
@@ -469,12 +475,88 @@ class RiskService:
             written += 1
         return written
 
-    # ---------- reconciliation and watchdog (component 7 fills these in) ----------
+    # ---------- reconciliation (account T) ----------
+    def log_positions_by_symbol(self, s: Session, now: datetime) -> dict[str, Decimal]:
+        out: dict[str, Decimal] = {}
+        for p in load_positions(s, now, self.policy):
+            out[p.symbol] = out.get(p.symbol, Decimal(0)) + p.qty
+        return {k: v for k, v in out.items() if v != 0}
+
+    def reconcile(self) -> bool:
+        """Compare account T's positions and open orders with the log; write a snapshot.
+        Any mismatch raises an incident, which sets PAUSE. Returns True if it matched."""
+        self.sync_orders()  # record fills that happened since the last tick first
+        now = self.clock.now()
+        acct = self.broker.account()
+        broker_pos = {k: v for k, v in self.broker.positions().items() if v != 0}
+        broker_open = self.broker.open_orders()
+        with self.sf() as s:
+            log_pos = self.log_positions_by_symbol(s, now)
+            known = set(s.scalars(select(Order.client_order_id).where(
+                Order.client_order_id.in_([o.client_order_id for o in broker_open])))) if broker_open else set()
+        problems: dict[str, Any] = {}
+        for sym in sorted(set(broker_pos) | set(log_pos)):
+            if broker_pos.get(sym, Decimal(0)) != log_pos.get(sym, Decimal(0)):
+                problems.setdefault("positions", {})[sym] = {"broker": qty_str(broker_pos.get(sym, 0)),
+                                                             "log": qty_str(log_pos.get(sym, 0))}
+        unknown = [o.client_order_id or o.id for o in broker_open if o.client_order_id not in known]
+        if unknown:
+            problems["unknown_open_orders"] = unknown
+        with self.sf() as s, s.begin():
+            s.add(PositionSnapshot(account="T", taken_at=now, equity=acct.equity, last_equity=acct.last_equity,
+                                   cash=acct.cash, positions={k: qty_str(v) for k, v in broker_pos.items()},
+                                   open_orders=[o.client_order_id or o.id for o in broker_open],
+                                   log_positions={k: qty_str(v) for k, v in log_pos.items()},
+                                   mismatch=bool(problems), detail=problems, run_id=self.run_id))
+            if problems:
+                self.raise_incident(s, "reconcile_mismatch", 2, problems, actor="reconciler")
+        log("reconciled", mismatch=bool(problems), equity=str(acct.equity), positions=len(broker_pos),
+            open_orders=len(broker_open), **({"problems": problems} if problems else {}))
+        return not problems
+
     def reconcile_if_due(self) -> bool:
+        """On startup nothing is sent until one reconcile has completed; afterwards every 30 s.
+        Returns False when orders must not go out this tick."""
+        mono = self.clock.monotonic()
+        if self.reconciled_once and self._last_reconcile is not None and mono - self._last_reconcile < RECONCILE_EVERY_S:
+            return True
+        try:
+            self.reconcile()
+        except Exception as exc:
+            log("reconcile_failed", error=f"{type(exc).__name__}: {exc}")
+            return self.reconciled_once  # before the first success: send nothing
+        self._last_reconcile = mono
+        self.reconciled_once = True
         return True
 
+    # ---------- watchdog (account D) ----------
+    def watchdog_check(self) -> bool:
+        """Account D is data-only. Any order or position there is a severity-1 incident."""
+        if self.watchdog is None:
+            return True
+        now = self.clock.now()
+        pos = {k: v for k, v in self.watchdog.positions().items() if v != 0}
+        orders = self.watchdog.open_orders()
+        bad = bool(pos or orders)
+        with self.sf() as s, s.begin():
+            s.add(PositionSnapshot(account="D", taken_at=now, positions={k: qty_str(v) for k, v in pos.items()},
+                                   open_orders=[o.client_order_id or o.id for o in orders], mismatch=bad,
+                                   detail={}, run_id=self.run_id))
+            if bad:
+                self.raise_incident(s, "account_d_activity", 1,
+                                    {"positions": {k: qty_str(v) for k, v in pos.items()},
+                                     "open_orders": [o.symbol for o in orders]}, actor="watchdog")
+        return not bad
+
     def watchdog_if_due(self) -> None:
-        return None
+        mono = self.clock.monotonic()
+        if self._last_watchdog is not None and mono - self._last_watchdog < RECONCILE_EVERY_S:
+            return
+        try:
+            self.watchdog_check()
+        except Exception as exc:
+            log("watchdog_failed", error=f"{type(exc).__name__}: {exc}")
+        self._last_watchdog = mono
 
     # ---------- loop ----------
     def tick(self) -> None:
@@ -509,6 +591,7 @@ class RiskService:
             since = (None if self.last_success_monotonic is None
                      else round(self.clock.monotonic() - self.last_success_monotonic, 3))
             return {"seconds_since_last_success": since, "kill_switch": state.value, "open_incidents": incidents,
+                    "unhealthy": bool(incidents) or not self.reconciled_once,
                     "ticks_ok": self.ticks_ok, "ticks_failed": self.ticks_failed, **self.counts,
                     "policy_version": self.loaded.hash, "run_id": self.run_id}
 
