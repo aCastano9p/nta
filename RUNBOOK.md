@@ -61,6 +61,13 @@ uv run nta verdict --start 2026-11-02 --end 2026-12-14   # prints the report; la
 ```
 Writes the per-filing table to `exports/verdict_<start>_<end>.csv` (`--csv PATH` to change, `--no-csv` to skip). Run it after labeling; before that it reports "no labeled filings" and STOP.
 
+## Dashboard
+```sh
+uv run nta dashboard            # real database -> http://127.0.0.1:8780/
+uv run nta dashboard --demo     # rebuilds the separate nta_demo database with synthetic data and shows it
+```
+Read-only. Shows process status (from the two `/healthz` endpoints), market status, the provisional verdict with its two thresholds, filings per day, poll latency, every filing with its observe/1h/1d/5d status, the quote schedule, process runs (crashes are flagged "no clean stop") and the allowlist. Click a ticker for the filing detail page (quotes, label, text preview). `/verdict` shows the full report; `/verdict.csv` downloads the per-filing table. Stop with Ctrl-C. Options: `--port`, `--poller-health`, `--quotes-health`.
+
 ## Tests
 ```sh
 docker compose up -d
@@ -87,6 +94,7 @@ uv run pytest -q              # rebuilds the nta_test database from migrations e
 | `error: ALPACA_KEY_ID and ALPACA_SECRET must be set` (exit 2) | Quote recorder needs Alpaca data keys. | Put both in `.env`. |
 | `quote_missing` | Alpaca returned no usable quote or trade for a symbol. | Retried every 5 s automatically. If it persists for one ticker, check the ticker exists on IEX (`alpaca_symbol` turns BRK/B into BRK.B). |
 | `quotes_tick_failed` | A tick failed (Alpaca down, bad keys -> 401/403, DB down). | Ticks continue every 0.5 s; `/healthz` on 8766 turns 503 after 30 s. A 401/403 means wrong keys. |
+| Dashboard shows an error page (500) | A rendering bug; the server keeps running. | The page shows the exception text; report it. Other pages still work. |
 | `nta db check` exits 1 | Migrations not applied. | `uv run nta db upgrade`. |
 
 ## Dev reset (destroys all data)

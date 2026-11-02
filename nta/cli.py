@@ -260,3 +260,34 @@ def verdict_cmd(
             csv_path = Path("exports") / f"verdict_{window[0]}_{window[1]}.csv"
         text, _ = verdict.run(s, s_date, e_date, None if no_csv else csv_path)
     typer.echo(text)
+
+
+@app.command("dashboard")
+def dashboard_cmd(
+    port: int = typer.Option(8780, help="Port on 127.0.0.1."),
+    demo: bool = typer.Option(False, help="Rebuild the separate nta_demo database with synthetic data and show that."),
+    poller_health: str = typer.Option("http://127.0.0.1:8765/healthz", help="EDGAR poller /healthz URL."),
+    quotes_health: str = typer.Option("http://127.0.0.1:8766/healthz", help="Quote recorder /healthz URL."),
+) -> None:
+    """Serve a read-only dashboard at http://127.0.0.1:<port>/."""
+    from sqlalchemy.engine import make_url
+
+    from nta.dashboard import Dashboard
+    from nta.db import database_url, make_engine, make_session_factory
+    from nta.demo import recreate_demo_database
+
+    url = database_url()
+    if demo:
+        typer.echo("building demo database (synthetic data)...")
+        url = recreate_demo_database(url)
+    db_name = make_url(url).database or "?"
+    health = {} if demo else {"EDGAR poller": poller_health, "Quote recorder": quotes_health}
+    dash = Dashboard(make_session_factory(make_engine(url)), db_name=db_name, demo=demo,
+                     port=port, health_urls=health)
+    typer.echo(f"dashboard: http://127.0.0.1:{dash.port}/  (database {db_name}; Ctrl-C to stop)")
+    try:
+        dash.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        dash.stop()

@@ -84,3 +84,12 @@ Choices the brief left open. Newest at the bottom of each section.
 - **Splits** by event_type and direction are over material filings; "all filings" and "labeled" rows are added for context.
 - **CSV** goes to `exports/verdict_<start>_<end>.csv` by default (git-ignored); prices with 4 decimals; includes `pre_filing_price` (last periodic quote before the filing) so the overnight gap can be studied later.
 - **Fixture first:** `tests/fixtures/verdict/fixture.json` (10 filings) with the expected answers worked out by hand in `tests/test_verdict.py`'s docstring. The code matched all of them on its first run.
+
+## Dashboard
+- **Added at the user's request (2026-11-01), overriding the brief's "no web UI" rule.** Kept inside the brief's other constraints: no new dependencies (stdlib `http.server`, server-rendered HTML), read-only (GET only, no forms, no writes), bound to 127.0.0.1.
+- **No JavaScript.** Auto-refresh every 15 s via `<meta http-equiv="refresh">`. CSP `default-src 'none'; style-src 'unsafe-inline'` blocks any script even if escaping were to fail.
+- **Untrusted content:** every DB value is HTML-escaped; filing text is shown only as escaped plain text in `<pre>`; only `https://www.sec.gov/...` URLs become links.
+- **Process status** comes from probing the poller's and recorder's `/healthz` (0.4 s timeout); runs with no `run_stops` row that are not the live process are flagged "no clean stop".
+- **Verdict panel** reuses `nta.verdict.compute` over the default window, marked *provisional* until there are 30 trading days and 100 labels.
+- **Demo mode (`--demo`)** drops and rebuilds a separate database, `nta_demo`, with a synthetic 30-trading-day dataset (deterministic seed) and shows a "Demo data" banner. It refuses to run if `DATABASE_URL` itself points at `nta_demo`. Synthetic filings link nowhere (`demo.invalid` URLs).
+- **Bug found while checking against the real dev DB:** the per-day chart dropped weekends, so a database whose only filing was seen on a Sunday crashed the page. Weekend days with filings are now kept (regression test added).

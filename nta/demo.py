@@ -65,7 +65,7 @@ def load_spec(sf: sessionmaker[Session], spec: dict[str, Any]) -> None:
                 form_type=f.get("form_type", "8-K"), cik=inst.cik, instrument_id=inst.id,
                 published_at=t0 - timedelta(seconds=f["latency_s"]), first_observed_at=t0,
                 ingested_at=t0 + timedelta(seconds=1),
-                url=f"https://www.sec.gov/Archives/edgar/data/{int(inst.cik)}/demo{f['n']}-index.htm",
+                url=spec.get("url_base", "https://www.sec.gov/Archives/edgar/data") + f"/{int(inst.cik)}/demo{f['n']}-index.htm",
                 items=items, raw=DEMO_DOC.format(items=", ".join(items)), raw_hash=None)
             s.add(ev)
             s.flush()
@@ -150,6 +150,7 @@ def synthetic_spec(seed: int = 1, start: date = date(2026, 9, 14), trading_days:
     first = sessions[0].open
     last = sessions[-1].close
     return {
+        "url_base": "https://demo.invalid/edgar",  # synthetic: never a real SEC link
         "window": {"start": sessions[0].open.astimezone(NEW_YORK).date().isoformat(),
                    "end": sessions[-1].open.astimezone(NEW_YORK).date().isoformat()},
         "instruments": [{"ticker": t, "figi": f, "cik": c, "name": nm} for t, f, c, nm in DEMO_TICKERS],
@@ -164,3 +165,39 @@ def synthetic_spec(seed: int = 1, start: date = date(2026, 9, 14), trading_days:
              "stopped_at": last.isoformat(), "reason": "signal SIGTERM"},
         ],
     }
+
+
+DEMO_DATABASE = "nta_demo"
+
+
+def recreate_demo_database(base_url: str, seed: int = 1) -> str:
+    """Drop and rebuild the demo database next to the real one, fill it with synthetic data,
+    and return its URL. Refuses to touch any database not named nta_demo."""
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    from nta.db import make_session_factory
+
+    if make_url(base_url).database == DEMO_DATABASE:
+        # DATABASE_URL itself points at nta_demo: it may be someone's real data. Refuse.
+        raise RuntimeError("DATABASE_URL already points at nta_demo; refusing to rebuild it")
+    url = make_url(base_url).set(database=DEMO_DATABASE)
+    admin = create_engine(url.set(database="postgres"), isolation_level="AUTOCOMMIT")
+    with admin.connect() as c:
+        c.execute(text(f'DROP DATABASE IF EXISTS "{DEMO_DATABASE}" WITH (FORCE)'))
+        c.execute(text(f'CREATE DATABASE "{DEMO_DATABASE}"'))
+    admin.dispose()
+    root = Path(__file__).resolve().parent.parent
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", url.render_as_string(hide_password=False))
+    cfg.attributes["configure_logger"] = False
+    command.upgrade(cfg, "head")
+    engine = create_engine(url)
+    load_spec(make_session_factory(engine), synthetic_spec(seed))
+    engine.dispose()
+    return url.render_as_string(hide_password=False)
