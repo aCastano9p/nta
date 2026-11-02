@@ -84,10 +84,33 @@ class SourceMeta:
     source_class: str
     weight: Decimal
     kind: SourceKind
+    event_types: frozenset[str] | None = None   # None = any
+    flags: tuple[str, ...] = ()
 
 
 def edgar_meta(_ev: SourceEvent) -> SourceMeta:
     return SourceMeta("edgar", "primary", Decimal(1), SourceKind.filing)
+
+
+def source_meta_for(registry) -> Callable[[SourceEvent], SourceMeta]:  # noqa: ANN001 (xsource.Registry)
+    """EDGAR filings are primary; X posts take class/weight/event types from sources.yaml,
+    with weight 0 and a flag when the author's handle or name no longer matches it."""
+    from nta.xsource import post_fields, quarantined
+
+    sources = registry.by_id() if registry is not None else {}
+
+    def meta(ev: SourceEvent) -> SourceMeta:
+        if ev.source_id != "x":
+            return edgar_meta(ev)
+        f = post_fields(ev.raw)
+        author = str(f.get("author_id", ""))
+        src = sources.get(author)
+        if src is None:
+            return SourceMeta(f"x:{author}", "commentator", Decimal(0), SourceKind.post, frozenset(), ("source_unregistered",))
+        flags = ("source_quarantined",) if quarantined(src, f.get("username"), f.get("name")) else ()
+        return SourceMeta(f"x:{author}", src.source_class, Decimal(0) if flags else src.weight, SourceKind.post,
+                          frozenset(e.value for e in src.event_types), flags)
+    return meta
 
 
 class QuoteSource(Protocol):
@@ -132,12 +155,14 @@ def post_text(raw: str | None) -> str:
 class Pipeline:
     def __init__(self, *, sf: sessionmaker[Session], clock: Clock, gateway: LlmGateway, models: ModelConfig,
                  policy: LoadedPolicy, quotes: QuoteSource, code_sha: str,
-                 source_meta: Callable[[SourceEvent], SourceMeta] = edgar_meta,
+                 source_meta: Callable[[SourceEvent], SourceMeta] | None = None,
                  sessions_fn: Callable[[datetime], list[MarketSession]] = sessions_around,
                  exposure_fn: Callable[[Session, datetime, Policy], Exposure] = load_exposure) -> None:
         self.sf, self.clock, self.gateway, self.models = sf, clock, gateway, models
         self.policy, self.quotes, self.code_sha = policy, quotes, code_sha
-        self.source_meta, self.sessions_fn, self.exposure_fn = source_meta, sessions_fn, exposure_fn
+        # Without a registry, X posts are "unregistered" (weight 0, never traded).
+        self.source_meta = source_meta or source_meta_for(None)
+        self.sessions_fn, self.exposure_fn = sessions_fn, exposure_fn
 
     # ---- pass 1: signals ----
     def item_for(self, ev: SourceEvent, inst: Instrument | None) -> tuple[Item, str]:
@@ -181,13 +206,21 @@ class Pipeline:
                      corroboration=a.corroboration, corroborated=a.corroborated, status=result.status,
                      triage_call_id=result.triage_call_id, extract_call_id=result.extract_call_id,
                      extraction=result.extraction.model_dump(mode="json") if result.extraction else None,
-                     flags=["injection_suspected"] if injection_suspected(item.text) else [],
+                     flags=self.signal_flags(item.text, meta, event_type),
                      ready_at=ready_at)
         with self.sf() as s, s.begin():
             s.add(sig)
         log("signal_written", source_event_id=ev.id, status=result.status.value, event_type=event_type,
             cluster_id=a.cluster_id, is_repeat=a.is_repeat, corroborated=a.corroborated)
         return sig
+
+    @staticmethod
+    def signal_flags(text: str, meta: SourceMeta, event_type: str) -> list[str]:
+        flags = ["injection_suspected"] if injection_suspected(text) else []
+        flags += list(meta.flags)
+        if meta.event_types is not None and event_type not in meta.event_types:
+            flags.append("event_type_not_allowed")
+        return flags
 
     def pending_events(self, since: datetime | None) -> list[SourceEvent]:
         with self.sf() as s:

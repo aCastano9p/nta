@@ -90,3 +90,25 @@ def risk_signing_key(env: Mapping[str, str] = os.environ) -> str:
     if len(key) < 32:
         raise ConfigError("RISK_SIGNING_KEY must be set (at least 32 characters, e.g. `openssl rand -hex 32`).")
     return key
+
+
+# ---------- optional X ingestion ----------
+
+def x_enabled(env: Mapping[str, str] = os.environ) -> bool:
+    return env.get("X_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+
+
+def x_bearer_token(env: Mapping[str, str] = os.environ) -> str:
+    token = env.get("X_BEARER_TOKEN", "").strip()
+    if not token or token == "replace-me":
+        raise ConfigError("X_BEARER_TOKEN must be set when X_ENABLED=true.")
+    return token
+
+
+def x_daily_usd(env: Mapping[str, str] = os.environ) -> "Decimal":
+    from decimal import Decimal
+    return Decimal(env.get("X_DAILY_USD") or "3")
+
+
+def x_poll_interval(env: Mapping[str, str] = os.environ) -> float:
+    return min(10.0, max(5.0, float(env.get("X_POLL_INTERVAL") or 7)))

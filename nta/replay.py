@@ -26,7 +26,7 @@ from typing import Any, Protocol
 from sqlalchemy import Connection, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from nta.agent import Pipeline, PositionManager, SourceMeta, edgar_meta
+from nta.agent import Pipeline, PositionManager, SourceMeta
 from nta.decide import (
     LIVE_DECISIONS,
     CENT,
@@ -231,7 +231,7 @@ def window_bounds(start: date, end: date) -> tuple[datetime, datetime]:
 
 def run_replay(sf: sessionmaker[Session], *, run_id: str, schema: str, start: date, end: date, policy: LoadedPolicy,
                models: ModelConfig, simulate: bool = False, bars: BarSource | None = None,
-               source_meta: Callable[[SourceEvent], SourceMeta] = edgar_meta,
+               source_meta: Callable[[SourceEvent], SourceMeta] | None = None,
                start_equity: Decimal | None = None) -> ReplayResult:
     """`sf` must already point at the replay schema (search_path). Raises CacheMiss if a
     model answer the replay needs was never recorded."""

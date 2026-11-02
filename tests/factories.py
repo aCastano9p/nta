@@ -28,6 +28,7 @@ from nta.schema import (
     Side,
     Signal,
     SignalStatus,
+    XPoll,
     EventType,
     Instrument,
     Label,
@@ -105,7 +106,9 @@ def one_of_each(s: Session) -> dict[str, object]:
     oev = OrderEvent(order_id=order.id, event="submitted", detail={}, first_observed_at=T0)
     fill = Fill(order_id=order.id, decision_id=dec.id, symbol="AAPL", side=Side.buy, qty=10, price=1.5,
                 cum_qty=10, first_observed_at=T0)
-    s.add_all([oev, fill])
+    xpoll = XPoll(author_id="12345678", status="ok", posts_returned=2, posts_billable=2, cost_usd=0.01,
+                  newest_id="1900000000000000001", first_observed_at=T0)
+    s.add_all([oev, fill, xpoll])
     s.flush()
     return {
         "instruments": inst, "runs": run, "source_events": ev, "openfigi_responses": figi,
@@ -113,5 +116,5 @@ def one_of_each(s: Session) -> dict[str, object]:
         "llm_calls": call, "signals": sig, "decisions": dec, "incidents": incident,
         "policy_versions": policy, "position_snapshots": snap, "guardrail_proposals": proposal,
         "kill_switch_events": kill, "risk_reviews": review, "orders": order, "grades": grade,
-        "postmortems": pm, "estimates": est, "order_events": oev, "fills": fill,
+        "postmortems": pm, "estimates": est, "order_events": oev, "fills": fill, "x_polls": xpoll,
     }

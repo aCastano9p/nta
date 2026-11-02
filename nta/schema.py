@@ -510,4 +510,19 @@ class PolicyVersion(_Row, Base):
     __table_args__ = (Index("ix_policy_versions_hash", "policy_hash"),)
 
 
+class XPoll(_Row, Base):
+    """One row per X timeline request (or skipped request), for spend and since_id."""
+
+    __tablename__ = "x_polls"
+    author_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)  # ok | error | budget_skipped
+    posts_returned: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    posts_billable: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
+    newest_id: Mapped[str | None] = mapped_column(String(32))
+    detail: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    __table_args__ = (Index("ix_x_polls_author_time", "author_id", "first_observed_at"),)
+
+
 APPEND_ONLY_TABLES = [t.name for t in Base.metadata.sorted_tables]

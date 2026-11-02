@@ -59,6 +59,7 @@ class Reason(StrEnum):
     llm_error = "llm_error"
     no_instrument = "no_instrument"
     injection_suspected = "injection_suspected"
+    source_not_allowed = "source_not_allowed"
     # judgment / policy -> abstain
     unclear = "unclear"
     low_conviction = "low_conviction"
@@ -510,6 +511,8 @@ def signal_level_reason(sig: SignalView) -> Reason | None:
         return _STATUS_REASON[sig.status]
     if "injection_suspected" in sig.flags:
         return Reason.injection_suspected
+    if "event_type_not_allowed" in sig.flags or "source_unregistered" in sig.flags:
+        return Reason.source_not_allowed
     if sig.instrument_id is None or not sig.symbol:
         return Reason.no_instrument
     return None

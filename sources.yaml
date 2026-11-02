@@ -1,0 +1,19 @@
+# Approved X accounts for `nta poll x` (off unless X_ENABLED=true). Only a human edits this.
+#
+# author_id     numeric X user id (never the handle: handles can be changed or re-registered)
+# handle        the @username you approved, without the @
+# display_name  the display name you approved
+# class         primary (the company or its executives' official accounts) | aggregator | commentator
+# weight        corroboration weight; at most 0.5 unless primary
+# event_types   which extracted event types this account may contribute
+#               (leadership, guidance, m_and_a, legal, financing, product, other)
+#
+# If an account's handle or display name differs from what is written here, its posts get
+# weight 0 (quarantined) until you update this file to re-approve it.
+sources: []
+#  - author_id: "12345678"
+#    handle: example_wire
+#    display_name: Example Wire
+#    class: aggregator
+#    weight: 0.5
+#    event_types: [guidance, m_and_a, leadership]

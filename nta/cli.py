@@ -172,6 +172,61 @@ def poll_edgar(
         stop_run(sf, run_id, stop.reason, clock)
 
 
+@poll_app.command("x")
+def poll_x(
+    health_port: int = typer.Option(8769, help="Port for GET /healthz on 127.0.0.1."),
+    once: bool = typer.Option(False, help="Poll every approved account once and exit."),
+) -> None:
+    """Poll approved X accounts (sources.yaml) by author id. Off unless X_ENABLED=true."""
+    import httpx
+
+    from nta.clock import SystemClock
+    from nta.config import ConfigError, x_bearer_token, x_daily_usd, x_enabled, x_poll_interval
+    from nta.db import make_engine, make_session_factory
+    from nta.health import HealthServer
+    from nta.logs import log
+    from nta.runs import start_run, stop_run
+    from nta.shutdown import StopFlag, install_signal_handlers
+    from nta.xpoll import XPoller, x_bucket
+    from nta.xsource import load_registry
+
+    if not x_enabled():
+        typer.echo("X ingestion is disabled (set X_ENABLED=true to enable).")
+        return
+    try:
+        bearer = x_bearer_token()
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    registry = load_registry()
+    clock = SystemClock()
+    sf = make_session_factory(make_engine())
+    interval = x_poll_interval()
+    config = {"process": "poll_x", "sources": [s.author_id for s in registry.sources], "interval_s": interval,
+              "daily_usd": str(x_daily_usd())}
+    run_id = start_run(sf, "poll_x", config, clock)
+    stop = StopFlag()
+    install_signal_handlers(stop)
+    health = None
+    try:
+        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as http:
+            poller = XPoller(sf=sf, http=http, bucket=x_bucket(clock), clock=clock, registry=registry, bearer=bearer,
+                             daily_usd=x_daily_usd(), run_id=run_id)
+            if once:
+                poller.poll_once()
+            else:
+                health = HealthServer(poller.health, port=health_port, stale_after_s=60).start()
+                log("healthz_listening", url=f"http://127.0.0.1:{health.port}/healthz")
+                poller.run(stop, interval_s=interval)
+    except BaseException as exc:
+        stop.set(f"error {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if health:
+            health.stop()
+        stop_run(sf, run_id, stop.reason, clock)
+
+
 @app.command("quotes")
 def quotes_cmd(
     tick: float = typer.Option(0.5, help="Seconds between scheduler ticks."),
@@ -278,8 +333,11 @@ def agent_cmd(
             alpaca = AlpacaData(http, alpaca_bucket(clock), clock, key, secret, feed=loaded.policy.quote_source)
             gateway = LlmGateway(sf, clock, backend=AnthropicBackend(llm_key), daily_usd=daily_usd_from_env())
             quotes = LiveQuotes(sf, alpaca, clock)
+            from nta.agent import source_meta_for
+            from nta.xsource import load_registry
+
             pipeline = Pipeline(sf=sf, clock=clock, gateway=gateway, models=models, policy=loaded, quotes=quotes,
-                                code_sha=code_sha())
+                                code_sha=code_sha(), source_meta=source_meta_for(load_registry()))
             manager = PositionManager(pipeline)
             proc = AgentProcess(pipeline, clock, run_id=run_id, lookback=timedelta(hours=lookback_h),
                                 manager=manager.step)
@@ -525,8 +583,12 @@ def replay_cmd(
         admin.dispose()
         engine = create_engine(url, connect_args={"options": f"-c search_path={schema},public"})
         try:
+            from nta.agent import source_meta_for
+            from nta.xsource import load_registry
+
             return run_replay(make_session_factory(engine), run_id=run_id, schema=schema, start=s_date, end=e_date,
-                              policy=load_policy(policy_file), models=models, simulate=simulate, bars=bars)
+                              policy=load_policy(policy_file), models=models, simulate=simulate, bars=bars,
+                              source_meta=source_meta_for(load_registry()))
         finally:
             engine.dispose()
 
