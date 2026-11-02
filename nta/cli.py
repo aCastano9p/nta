@@ -12,6 +12,8 @@ allowlist_app = typer.Typer(no_args_is_help=True, help="Manage the instrument al
 app.add_typer(allowlist_app, name="allowlist")
 poll_app = typer.Typer(no_args_is_help=True, help="Long-running pollers.")
 app.add_typer(poll_app, name="poll")
+kill_app = typer.Typer(no_args_is_help=True, help="Kill switch. For humans only: no process calls these.")
+app.add_typer(kill_app, name="kill")
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -283,6 +285,133 @@ def agent_cmd(
                 health = HealthServer(proc.health, port=health_port, stale_after_s=stale_after).start()
                 log("healthz_listening", url=f"http://127.0.0.1:{health.port}/healthz")
                 proc.run(stop, tick_s=tick)
+    except BaseException as exc:
+        stop.set(f"error {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if health:
+            health.stop()
+        stop_run(sf, run_id, stop.reason, clock)
+
+
+def _kill(state: str, reason: str) -> None:
+    from nta.clock import SystemClock
+    from nta.db import make_engine, make_session_factory
+    from nta.risk import write_kill
+    from nta.schema import KillState
+
+    sf = make_session_factory(make_engine())
+    with sf() as s, s.begin():
+        write_kill(s, KillState(state), "human", reason, SystemClock().now())
+    typer.echo(f"kill switch -> {state} ({reason})")
+
+
+@kill_app.command("pause")
+def kill_pause(reason: str = typer.Option(..., "--reason", "-r", help="Why (stored with the event).")) -> None:
+    """Stop new entries; open positions are still managed and closed."""
+    _kill("PAUSE", reason)
+
+
+@kill_app.command("flatten")
+def kill_flatten(reason: str = typer.Option(..., "--reason", "-r")) -> None:
+    """Stop entries and close every open position."""
+    _kill("FLATTEN", reason)
+
+
+@kill_app.command("halt")
+def kill_halt(reason: str = typer.Option(..., "--reason", "-r")) -> None:
+    """Send nothing at all and cancel open orders; positions are left as they are."""
+    _kill("HALT", reason)
+
+
+@kill_app.command("resume")
+def kill_resume(reason: str = typer.Option(..., "--reason", "-r")) -> None:
+    """Back to RUN. Closes every open incident. Requires typing RESUME."""
+    from nta.db import make_engine, make_session_factory
+    from nta.risk import open_incidents
+
+    with make_session_factory(make_engine())() as s:
+        incidents = open_incidents(s)
+    for i in incidents:
+        typer.echo(f"open incident: sev{i.severity} {i.kind} at {i.at.isoformat()} {i.detail}")
+    answer = typer.prompt("Type RESUME to resume trading")
+    if answer.strip() != "RESUME":
+        typer.echo("not resumed")
+        raise typer.Exit(1)
+    _kill("RUN", reason)
+
+
+@kill_app.command("status")
+def kill_status() -> None:
+    """Print the kill switch state and open incidents."""
+    from nta.clock import SystemClock
+    from nta.db import make_engine, make_session_factory
+    from nta.decide import load_kill_state
+    from nta.risk import open_incidents
+
+    with make_session_factory(make_engine())() as s:
+        typer.echo(f"state: {load_kill_state(s, SystemClock().now()).value}")
+        for i in open_incidents(s):
+            typer.echo(f"open incident: sev{i.severity} {i.kind} at {i.at.isoformat()} {i.detail}")
+
+
+@app.command("risk")
+def risk_cmd(
+    tick: float = typer.Option(0.5, help="Seconds between ticks."),
+    health_port: int = typer.Option(8768, help="Port for GET /healthz on 127.0.0.1."),
+    stale_after: float = typer.Option(30.0, help="/healthz returns 503 after this many seconds without a successful tick."),
+    policy_path: Path = typer.Option(None, "--policy", help="Policy file (default policy/policy.yaml)."),
+    once: bool = typer.Option(False, help="Run one tick and exit (for checks)."),
+) -> None:
+    """Re-check, sign and execute trade decisions on paper account T; reconcile; watchdog account D."""
+    import httpx
+
+    from nta.alpaca import AlpacaData
+    from nta.broker import AlpacaPaperBroker
+    from nta.clock import SystemClock
+    from nta.config import ConfigError, alpaca_credentials, assert_risk_env, risk_signing_key, trading_credentials
+    from nta.db import make_engine, make_session_factory
+    from nta.health import HealthServer
+    from nta.logs import log
+    from nta.policy import DEFAULT_POLICY_PATH, load_policy, record_policy_version
+    from nta.ratelimit import alpaca_bucket
+    from nta.risk import RiskService, alpaca_quote_fn
+    from nta.runs import code_sha, start_run, stop_run
+    from nta.shutdown import StopFlag, install_signal_handlers
+
+    try:
+        assert_risk_env()  # first: refuse before reading any other credential
+        t_key, t_secret = trading_credentials()
+        signing_key = risk_signing_key()
+        d_key, d_secret = alpaca_credentials()  # account D, read-only use by the watchdog
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    clock = SystemClock()
+    sf = make_session_factory(make_engine())
+    loaded = load_policy(policy_path or DEFAULT_POLICY_PATH)
+    config = {"process": "risk", "tick_s": tick, "policy_version": loaded.hash, "feed": loaded.policy.quote_source,
+              "trading_url": "https://paper-api.alpaca.markets"}
+    run_id = start_run(sf, "risk", config, clock)
+    record_policy_version(sf, loaded, process="risk", run_id=run_id, signing_key=signing_key)
+    stop = StopFlag()
+    install_signal_handlers(stop)
+    health = None
+    try:
+        with httpx.Client(timeout=httpx.Timeout(5.0, connect=3.0)) as http:
+            bucket = alpaca_bucket(clock)
+            data_t = AlpacaData(http, alpaca_bucket(clock), clock, t_key, t_secret, feed=loaded.policy.quote_source)
+            risk = RiskService(sf=sf, clock=clock, broker=AlpacaPaperBroker(http, bucket, clock, t_key, t_secret),
+                               quotes=alpaca_quote_fn(data_t, clock), policy=loaded, signing_key=signing_key,
+                               run_id=run_id, watchdog=AlpacaPaperBroker(http, alpaca_bucket(clock), clock, d_key, d_secret),
+                               code_sha=code_sha())
+            if once:
+                risk.tick()
+            else:
+                health = HealthServer(risk.health, port=health_port, stale_after_s=stale_after).start()
+                log("healthz_listening", url=f"http://127.0.0.1:{health.port}/healthz")
+                risk.run(stop, tick_s=tick)
     except BaseException as exc:
         stop.set(f"error {type(exc).__name__}: {exc}")
         raise
