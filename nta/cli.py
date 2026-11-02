@@ -56,7 +56,7 @@ def allowlist_load(
 
     from nta import allowlist
     from nta.clock import SystemClock
-    from nta.config import optional_sec_user_agent
+    from nta.config import openfigi_api_key, optional_sec_user_agent
     from nta.db import make_engine, make_session_factory
     from nta.logs import log
     from nta.ratelimit import openfigi_bucket, sec_bucket
@@ -70,7 +70,9 @@ def allowlist_load(
             sec_ciks = allowlist.fetch_sec_tickers(http, sec_bucket(clock), clock, ua)
         else:
             log("allowlist_cik_check_skipped", reason="SEC_USER_AGENT not set")
-        figi = allowlist.OpenFigiClient(http, openfigi_bucket(clock), clock, sf)
+        figi_key = openfigi_api_key()
+        figi = allowlist.OpenFigiClient(http, openfigi_bucket(clock, keyed=bool(figi_key)), clock, sf,
+                                        api_key=figi_key)
         report = allowlist.load(sf, csv_path.read_text(), figi, _as_of(as_of), sec_ciks)
     typer.echo(f"added={len(report.added)} already_present={len(report.already_present)} "
                f"rejected={len(report.rejected)} openfigi_requests={figi.http_requests}")

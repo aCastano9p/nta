@@ -4,7 +4,9 @@ There is deliberately no way to point this at a trading endpoint: the base URL m
 data.alpaca.markets, and only GET /v2/stocks/snapshots is ever called.
 """
 
+import threading
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -22,6 +24,7 @@ ALLOWED_HOST = "data.alpaca.markets"
 SOURCE = "alpaca_iex"
 FEED = "iex"
 MAX_SYMBOLS_PER_REQUEST = 100
+MAX_PARALLEL_REQUESTS = 5  # 500 tickers in one round trip; the shared bucket still caps the rate
 
 
 @dataclass(frozen=True)
@@ -85,19 +88,30 @@ class AlpacaData:
         self._http, self._bucket, self._clock = http, bucket, clock
         self._base = base_url.rstrip("/")
         self._headers = {"APCA-API-KEY-ID": key_id, "APCA-API-SECRET-KEY": secret}
+        self._count_lock = threading.Lock()
         self.requests = 0
 
-    def snapshots(self, symbols: Sequence[str]) -> dict[str, Snapshot]:
-        out: dict[str, Snapshot] = {}
-        uniq = list(dict.fromkeys(symbols))
-        for i in range(0, len(uniq), MAX_SYMBOLS_PER_REQUEST):
-            chunk = uniq[i:i + MAX_SYMBOLS_PER_REQUEST]
-            req = self._http.build_request(
-                "GET", f"{self._base}/v2/stocks/snapshots",
-                params={"symbols": ",".join(chunk), "feed": FEED}, headers=self._headers)
+    def _fetch(self, chunk: list[str]) -> dict[str, Snapshot]:
+        req = self._http.build_request(
+            "GET", f"{self._base}/v2/stocks/snapshots",
+            params={"symbols": ",".join(chunk), "feed": FEED}, headers=self._headers)
+        with self._count_lock:
             self.requests += 1
-            resp = send_with_retry(self._http, req, bucket=self._bucket, clock=self._clock,
-                                   max_attempts=4, base_delay=0.25, max_delay=5.0)
-            resp.raise_for_status()
-            out.update(parse_snapshots(resp.json()))
+        resp = send_with_retry(self._http, req, bucket=self._bucket, clock=self._clock,
+                               max_attempts=4, base_delay=0.25, max_delay=5.0)
+        resp.raise_for_status()
+        return parse_snapshots(resp.json())
+
+    def snapshots(self, symbols: Sequence[str]) -> dict[str, Snapshot]:
+        """Latest snapshot per symbol. Chunks of 100 symbols are fetched concurrently
+        (httpx.Client and the token bucket are thread-safe); any chunk error is raised."""
+        uniq = list(dict.fromkeys(symbols))
+        chunks = [uniq[i:i + MAX_SYMBOLS_PER_REQUEST] for i in range(0, len(uniq), MAX_SYMBOLS_PER_REQUEST)]
+        if len(chunks) <= 1:
+            return self._fetch(chunks[0]) if chunks else {}
+        out: dict[str, Snapshot] = {}
+        with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_REQUESTS, len(chunks)),
+                                thread_name_prefix="alpaca") as pool:
+            for part in pool.map(self._fetch, chunks):
+                out.update(part)
         return out

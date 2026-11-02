@@ -93,3 +93,7 @@ Choices the brief left open. Newest at the bottom of each section.
 - **Verdict panel** reuses `nta.verdict.compute` over the default window, marked *provisional* until there are 30 trading days and 100 labels.
 - **Demo mode (`--demo`)** drops and rebuilds a separate database, `nta_demo`, with a synthetic 30-trading-day dataset (deterministic seed) and shows a "Demo data" banner. It refuses to run if `DATABASE_URL` itself points at `nta_demo`. Synthetic filings link nowhere (`demo.invalid` URLs).
 - **Bug found while checking against the real dev DB:** the per-day chart dropped weekends, so a database whose only filing was seen on a Sunday crashed the page. Weekend days with filings are now kept (regression test added).
+
+## Throughput (2026-11-02)
+- **Alpaca snapshot chunks (100 symbols each) are fetched concurrently**, up to 5 at a time, so a 500-ticker periodic quote is one round trip instead of five sequential ones and cannot delay observe quotes. The shared token bucket still caps the rate; a failed chunk fails the whole call, which is retried on the next tick.
+- **OpenFIGI is not parallelized:** its limit is on requests per minute, so concurrent requests would only produce 429s. Instead, an **optional `OPENFIGI_API_KEY`** (free) raises the limits from 25 req/min of 10 tickers to 25 req/6 s of 100 tickers (bucket 5 + 20 per 6 s). Without the key nothing changes. Answers are cached, so this only matters for the first load of a large allowlist.

@@ -42,10 +42,13 @@ FIGI_DB = {
 class FakeOpenFigi:
     def __init__(self) -> None:
         self.requests: list[list[dict]] = []
+        self.keys: list[str | None] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         jobs = json.loads(request.content)
-        assert len(jobs) <= 10
+        keyed = "X-OPENFIGI-APIKEY" in request.headers
+        assert len(jobs) <= (100 if keyed else 10)
+        self.keys.append(request.headers.get("X-OPENFIGI-APIKEY"))
         self.requests.append(jobs)
         out = [FIGI_DB.get(j["idValue"], {"warning": "No identifier found."}) for j in jobs]
         return httpx.Response(200, json=out)
@@ -235,3 +238,25 @@ def test_remove_and_readd_same_day(
     report = allowlist.load(session_factory, CSV, figi_client, D)
     assert report.added == ["AAPL"]
     assert "AAPL" in [i.ticker for i in allowlist.current(session, D)]
+
+
+def test_api_key_raises_batch_size(fake_figi: FakeOpenFigi, session_factory: sessionmaker[Session]) -> None:
+    clock = FakeClock()
+    http = httpx.Client(transport=httpx.MockTransport(fake_figi.handler))
+    client = OpenFigiClient(http, openfigi_bucket(clock, keyed=True), clock, session_factory, api_key="k123")
+    lines = "".join(f"T{i},Co {i},{i + 1}\n" for i in range(230))
+    allowlist.load(session_factory, "ticker,name,cik\n" + lines, client, D)
+    assert [len(r) for r in fake_figi.requests] == [100, 100, 30]
+    assert fake_figi.keys == ["k123"] * 3
+
+
+def test_keyed_bucket_respects_25_per_6_seconds() -> None:
+    from tests.test_ratelimit_http import max_in_window
+    clock = FakeClock()
+    bucket = openfigi_bucket(clock, keyed=True)
+    times = []
+    for _ in range(100):
+        bucket.acquire()
+        times.append(clock.monotonic())
+    assert max_in_window(times, 6.0) <= 25
+    assert times[-1] < 30  # vs ~4.5 minutes without a key

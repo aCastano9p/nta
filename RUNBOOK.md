@@ -16,7 +16,7 @@ uv run nta allowlist load data/allowlist_dev.csv   # or your CSV: ticker,name,ci
 uv run nta allowlist show [--as-of 2026-11-02]
 uv run nta allowlist remove XOM [--as-of 2026-11-02]
 ```
-Set `SEC_USER_AGENT` before loading so CIKs are checked against SEC's ticker list. Re-running a load is safe (no duplicates; OpenFIGI answers come from the DB cache). Rejected rows are printed with a reason and not stored.
+Set `SEC_USER_AGENT` before loading so CIKs are checked against SEC's ticker list. For allowlists of hundreds of tickers, set the optional `OPENFIGI_API_KEY` (free at openfigi.com) so the first load takes seconds instead of minutes. Re-running a load is safe (no duplicates; OpenFIGI answers come from the DB cache). Rejected rows are printed with a reason and not stored.
 
 ## EDGAR poller
 Start (foreground; logs are JSON lines on stdout):

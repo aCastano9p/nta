@@ -25,6 +25,7 @@ from nta.schema import Instrument, OpenFigiResponse
 
 OPENFIGI_URL = "https://api.openfigi.com/v3/mapping"
 OPENFIGI_MAX_JOBS = 10  # per request, without an API key
+OPENFIGI_MAX_JOBS_KEYED = 100
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-/]{0,9}$")
@@ -181,8 +182,10 @@ class OpenFigiClient:
     (data or "not found"); errors are retried next time."""
 
     def __init__(self, http: httpx.Client, bucket: TokenBucket, clock: Clock,
-                 session_factory: sessionmaker[Session]) -> None:
+                 session_factory: sessionmaker[Session], api_key: str | None = None) -> None:
         self._http, self._bucket, self._clock, self._sf = http, bucket, clock, session_factory
+        self._headers = {"X-OPENFIGI-APIKEY": api_key} if api_key else {}
+        self._batch = OPENFIGI_MAX_JOBS_KEYED if api_key else OPENFIGI_MAX_JOBS
         self.http_requests = 0
 
     def _cached(self, keys: Sequence[str]) -> dict[str, dict]:
@@ -198,9 +201,9 @@ class OpenFigiClient:
         keys = [request_key(j) for j in jobs]
         results = self._cached(keys)
         misses = [j for j, k in zip(jobs, keys) if k not in results]
-        for i in range(0, len(misses), OPENFIGI_MAX_JOBS):
-            batch = misses[i:i + OPENFIGI_MAX_JOBS]
-            req = self._http.build_request("POST", OPENFIGI_URL, json=batch)
+        for i in range(0, len(misses), self._batch):
+            batch = misses[i:i + self._batch]
+            req = self._http.build_request("POST", OPENFIGI_URL, json=batch, headers=self._headers)
             self.http_requests += 1
             resp = send_with_retry(self._http, req, bucket=self._bucket, clock=self._clock)
             resp.raise_for_status()

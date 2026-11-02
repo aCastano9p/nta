@@ -36,3 +36,9 @@ def alpaca_credentials(env: Mapping[str, str] = os.environ) -> tuple[str, str]:
     if key in placeholders or secret in placeholders:
         raise ConfigError("ALPACA_KEY_ID and ALPACA_SECRET must be set (market data API keys).")
     return key, secret
+
+
+def openfigi_api_key(env: Mapping[str, str] = os.environ) -> str | None:
+    """Optional. Without it OpenFIGI allows 25 requests/min of 10 tickers; with it 25 per 6 s of 100."""
+    value = env.get("OPENFIGI_API_KEY", "").strip()
+    return value if value and value != "replace-me" else None

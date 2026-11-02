@@ -197,3 +197,24 @@ def test_credentials_required() -> None:
     from nta.cli import app
     result = CliRunner().invoke(app, ["quotes", "--once"], env={"ALPACA_KEY_ID": "", "ALPACA_SECRET": ""})
     assert result.exit_code == 2 and "ALPACA_KEY_ID" in result.output
+
+
+def test_snapshot_chunks_are_fetched_in_parallel() -> None:
+    import threading
+    clock = FakeClock(start=THU_10AM_ET)
+    barrier = threading.Barrier(3, timeout=5)  # only passes if 3 requests are in flight together
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        symbols = request.url.params["symbols"].split(",")
+        seen.append(len(symbols))
+        barrier.wait()
+        t = clock.now().isoformat().replace("+00:00", "Z")
+        return httpx.Response(200, json={s: {"latestTrade": {"t": t, "p": 1.0}} for s in symbols})
+
+    a = AlpacaData(httpx.Client(transport=httpx.MockTransport(handler)), alpaca_bucket(clock), clock,
+                   "kid", "sec")
+    out = a.snapshots([f"S{i}" for i in range(250)])
+    assert len(out) == 250
+    assert sorted(seen) == [50, 100, 100]
+    assert a.requests == 3
