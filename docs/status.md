@@ -4,7 +4,7 @@ As of 2026-11-02. Update this file when a component lands, something is validate
 
 ## Built
 
-Phase 0 (unchanged; `nta verdict` output is tested to be identical with phase 1 rows present) and every phase 1 component, each with tests (343 passing, 1 opt-in regeneration test skipped):
+Phase 0 (unchanged; `nta verdict` output is tested to be identical with phase 1 rows present) and every phase 1 component, each with tests (351 passing, 1 opt-in regeneration test skipped):
 
 | Component | Command / module | Phase 1 brief item |
 |---|---|---|
@@ -22,7 +22,7 @@ Phase 0 (unchanged; `nta verdict` output is tested to be identical with phase 1 
 | Dashboard pages | `nta dashboard` → `/loop` and others | 12 |
 | Containers | `Dockerfile`, `docker compose --profile app` | DoD |
 
-Every test the phase 1 brief lists exists: credential refusal (both processes, CLI and container), injected HMAC, timeout after accept, restart at both crash points, reconcile mismatch → PAUSE with the stop-loss still firing, prompt injection (obeying model and schema-valid output), golden replay + cache miss, verdict unchanged, LLM and X budget caps.
+An independent review of the money path found six issues, all fixed with regression tests (DECISIONS, "Fixes after an independent review"). Every test the phase 1 brief lists exists: credential refusal (both processes, CLI and container), injected HMAC, timeout after accept, restart at both crash points, reconcile mismatch → PAUSE with the stop-loss still firing, prompt injection (obeying model and schema-valid output), golden replay + cache miss, verdict unchanged, LLM and X budget caps.
 
 ## Validated live
 
