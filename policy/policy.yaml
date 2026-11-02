@@ -1,0 +1,87 @@
+# NTA trading policy. Only a human edits this file; processes read it once at startup.
+# nta risk hashes and signs it (policy_versions) and enforces it; nta agent reads it to
+# plan. Every decision records the sha256 of this exact file as policy_version.
+# Percentages are in percent (0.25 = 0.25 %), basis points in bps.
+
+long_only: true
+
+# iex = free IEX feed: its bid/ask is often 500+ bps wide, so the spread check uses the
+# last trade and every decision is flagged spread_unverified. sip = Alpaca Algo Trader
+# Plus (USD 99/month), where the NBBO spread is checked directly.
+quote_source: iex
+
+# Sizing: shares = floor(risk_unit * equity / (entry - stop)), then capped.
+risk_unit_pct: 0.25
+stop:
+  atr_multiple: 2.0     # stop distance = max(atr_multiple * 5-min ATR, min_pct of price)
+  atr_periods: 14       # 5-minute periods in the ATR
+  min_pct: 1.0
+take_profit_r: 2.0      # take-profit = entry + take_profit_r * (entry - stop)
+
+position_cap_pct: 10
+max_open_positions: 5
+cluster_cap_pct: 15
+sector_cap_pct: 25
+
+quote_max_age_s: 5
+spread_limit_bps: 20
+daily_loss_stop_pct: 1.0
+drawdown_pause_pct: 5.0
+
+# already_priced: |move since first observed| > k * daily vol * sqrt(elapsed / trading day)
+already_priced_k: 1.5
+default_daily_vol_pct: 2.0   # used when too few 5-minute quotes exist to estimate vol
+min_p_up: 0.6                # model probability of "up at horizon" needed to buy
+
+# Per source kind: filing = EDGAR 8-K, post = X.
+latency_budget_min:
+  filing: 60
+  post: 10
+horizon_trading_days:
+  filing: 2
+  post: 1
+
+# Execution (marketable limit orders, day orders).
+entry_limit_bps: 10     # buy limit = reference price * (1 + this)
+exit_limit_bps: 50      # sell limit = reference price * (1 - this)
+entry_ttl_s: 60         # cancel an entry still open after this long
+
+# Cost model for expected_cost_bps (round trip).
+assumed_spread_bps_unverified: 5
+slippage_bps: 5
+fee_bps: 0.5
+
+blackouts:
+  minutes_after_open: 5
+  minutes_before_close: 10
+  windows: []           # e.g. - {start: "2026-12-16T18:45:00Z", end: "2026-12-16T19:30:00Z"}  (FOMC)
+
+clustering:
+  repeat_window_h: 72
+  minhash_threshold: 0.5
+corroboration:
+  min_origins: 2        # a non-primary signal needs this many distinct origins...
+  min_weight: 1.0       # ...whose weights sum to at least this
+
+# GICS sector per ticker, for the sector cap. Unlisted tickers count as sector "unknown".
+sectors:
+  AAPL: information_technology
+  MSFT: information_technology
+  NVDA: information_technology
+  AMZN: consumer_discretionary
+  TSLA: consumer_discretionary
+  HD: consumer_discretionary
+  GOOGL: communication_services
+  META: communication_services
+  JPM: financials
+  V: financials
+  MA: financials
+  BAC: financials
+  JNJ: health_care
+  UNH: health_care
+  LLY: health_care
+  WMT: consumer_staples
+  PG: consumer_staples
+  KO: consumer_staples
+  COST: consumer_staples
+  XOM: energy
