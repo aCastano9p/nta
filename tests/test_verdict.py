@@ -23,7 +23,17 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from nta.demo import load_spec
 from nta.schema import QuoteKind
-from nta.verdict import QuotePoint, Record, compute, format_report, load_records, pct, run, wilson
+from nta.verdict import (
+    QuotePoint,
+    Record,
+    compute,
+    format_report,
+    load_records,
+    pct,
+    price_and_source,
+    run,
+    wilson,
+)
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "verdict" / "fixture.json").read_text())
 START, END = date(2026, 10, 1), date(2026, 10, 30)
@@ -140,3 +150,35 @@ def test_pct_and_wilson() -> None:
     assert pct([1, 2, 3, 4], 0.5) == 2.5
     lo, hi = wilson(0, 10)
     assert lo == 0.0 and hi == pytest.approx(0.2775, abs=1e-4)
+
+
+@pytest.mark.parametrize("bid,ask,last,expected", [
+    ("99.99", "100.01", "100.00", ("100.00", "mid")),     # 2 bps: tight
+    ("99.90", "100.10", "100.05", ("100.00", "mid")),     # exactly 20 bps: still mid
+    ("323.89", "341.20", "341.18", ("341.18", "last")),   # JPM seen live: 520 bps -> last trade
+    ("99.00", "101.00", None, (None, None)),              # wide and no trade: no price
+    (None, "100.01", "100.00", ("100.00", "last")),       # one side missing
+    ("101.00", "100.00", "100.50", ("100.50", "last")),   # crossed
+    (None, None, None, (None, None)),
+])
+def test_price_rule(bid, ask, last, expected) -> None:
+    d = lambda v: None if v is None else Decimal(v)  # noqa: E731
+    price, source = price_and_source(d(bid), d(ask), d(last))
+    assert (None if price is None else f"{price:.2f}", source) == expected
+
+
+def test_wide_quotes_are_priced_from_last_trade(session_factory, session, tmp_path) -> None:
+    spec = json.loads(json.dumps(FIXTURE))
+    spec["filings"][0]["quote_style"] = "wide"  # filing 1: every quote has a 600 bps lopsided spread
+    load_spec(session_factory, spec)
+    records = load_records(session, START, END)
+    first = next(r for r in records if r.accession.endswith("000001"))
+    assert first.observe.source == "last"
+    assert first.move_bps(QuoteKind.mark_1d) == pytest.approx(80.0)  # the mid would give ~81.6
+    report = compute(records, START, END)
+    assert report.material_median_1d == pytest.approx(42.5)  # unchanged hand-checked answer
+    assert report.price_sources == {"mid": 31, "last": 8}  # 39 quotes; filing 8 last-only, filing 1 wide
+    out = tmp_path / "v.csv"
+    run(session, START, END, out)
+    row = next(csv.DictReader(out.open()))
+    assert (row["observe_price_source"], row["price_1d_source"]) == ("last", "last")

@@ -75,7 +75,7 @@ Choices the brief left open. Newest at the bottom of each section.
 
 ## Verdict
 - **Window** = New York dates of `first_observed_at`, inclusive; default first to last stored filing. `--start/--end` override.
-- **Price** = mid if both bid and ask are usable, else last.
+- **Price = mid only when the quote is tight (spread <= 20 bps of the mid); otherwise the last trade** (decided with the user on 2026-11-02, replacing the brief's "mid, or last if no bid/ask"). Reason: the free plan's IEX quotes show only IEX's own book. A live snapshot on 2026-11-02 had JPM, MA and PG with 500-600 bps spreads and mids 2.5-2.9% away from the last trade, which would swamp the 30 bps threshold. A wide quote with no trade has no price (the move counts as missing). The rule runs at verdict time on the stored bid/ask/last, so it can be changed later without re-collecting. The verdict prints how many prices came from each source, and the CSV has a `*_source` column per price.
 - **Move** = mark price / observe price - 1, in bps; stats use the absolute value, the CSV keeps the sign. A quote recorded more than 10 minutes after its due time is not used (counted as "excluded"); a mark with no quote is "missing". Both counts are printed.
 - **Percentiles** use linear interpolation between closest ranks (numpy's default); IQR = p25-p75.
 - **Material filings per month** = filings observed in the window x material share of the labeled sample x 30.4375 / window calendar days. Interval = 95% Wilson interval of the share, scaled the same way (no finite-population correction, so it is slightly conservative when the sample is a large part of the window).

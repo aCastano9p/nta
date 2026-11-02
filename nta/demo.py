@@ -39,6 +39,8 @@ def _quote(instrument_id: str, event_id: str | None, kind: QuoteKind, price: Dec
            at: datetime, style: str) -> Quote:
     if style == "last":
         bid = ask = None
+    elif style == "wide":  # lopsided IEX-style quote: mid is $2 below the real price
+        bid, ask = price - 5, price + 1
     else:
         bid, ask = price - HALF_SPREAD, price + HALF_SPREAD
     return Quote(instrument_id=instrument_id, source_event_id=event_id, ts=at, first_observed_at=at,

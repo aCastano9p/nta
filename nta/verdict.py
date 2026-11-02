@@ -28,6 +28,7 @@ MIN_MATERIAL_PER_MONTH = 60.0
 DAYS_PER_MONTH = 30.4375
 QUOTE_TOLERANCE = timedelta(minutes=10)  # a quote recorded later than this after due is not used
 OBSERVE_LATE_S = 5.0
+MAX_MID_SPREAD_BPS = 20.0  # wider IEX quotes are priced from the last trade instead
 HORIZONS = {QuoteKind.mark_1h: "1h", QuoteKind.mark_1d: "1d", QuoteKind.mark_5d: "5d"}
 
 
@@ -36,6 +37,7 @@ class QuotePoint:
     price: Decimal
     observed_at: datetime
     due_at: datetime | None
+    source: str = "mid"  # "mid" or "last"
 
     @property
     def on_time(self) -> bool:
@@ -110,15 +112,30 @@ class Report:
     material_median_1d: float | None
     verdict: str
     reasons: list[str] = field(default_factory=list)
+    price_sources: dict[str, int] = field(default_factory=dict)
 
 
 # ---------- pure math ----------
 
-def quote_price(bid: Decimal | None, ask: Decimal | None, last: Decimal | None) -> Decimal | None:
-    """Mid if both sides are usable, else last."""
+def price_and_source(bid: Decimal | None, ask: Decimal | None,
+                     last: Decimal | None) -> tuple[Decimal | None, str | None]:
+    """The price of a quote and where it came from.
+
+    Mid when the quote is two-sided and tight (spread <= 20 bps of the mid); otherwise
+    the last trade. The free plan's IEX quotes only show IEX's own book, which is often
+    far wider than the national market, so their mid can sit hundreds of bps away from
+    where the stock trades. A wide quote with no trade has no price."""
     if bid is not None and ask is not None and bid > 0 and ask >= bid:
-        return (bid + ask) / 2
-    return last
+        mid = (bid + ask) / 2
+        if (ask - bid) / mid * 10000 <= Decimal(str(MAX_MID_SPREAD_BPS)):
+            return mid, "mid"
+    if last is not None and last > 0:
+        return last, "last"
+    return None, None
+
+
+def quote_price(bid: Decimal | None, ask: Decimal | None, last: Decimal | None) -> Decimal | None:
+    return price_and_source(bid, ask, last)[0]
 
 
 def pct(values: Iterable[float], p: float) -> float | None:
@@ -205,8 +222,11 @@ def compute(records: list[Record], start: date, end: date) -> Report:
         reasons.append(f"material filings per month {per_month:.1f} < {MIN_MATERIAL_PER_MONTH:g}")
 
     by_form: dict[str, int] = {}
+    sources: dict[str, int] = {}
     for r in records:
         by_form[r.form_type] = by_form.get(r.form_type, 0) + 1
+        for q in ([r.observe] if r.observe else []) + list(r.marks.values()):
+            sources[q.source] = sources.get(q.source, 0) + 1
 
     return Report(
         start=start, end=end, days=days, n_filings=n, n_by_form=by_form,
@@ -216,7 +236,7 @@ def compute(records: list[Record], start: date, end: date) -> Report:
         latency_p50=pct(latencies, 0.5), latency_p95=pct(latencies, 0.95),
         n_in_session=len(in_session), n_observe_late=len(late), n_observe_missing=len(no_obs),
         n_after_hours=n - len(in_session), material_median_1d=med_1d,
-        verdict="STOP" if reasons else "CONTINUE", reasons=reasons,
+        verdict="STOP" if reasons else "CONTINUE", reasons=reasons, price_sources=sources,
     )
 
 
@@ -254,6 +274,8 @@ def format_report(r: Report) -> str:
     lines += [
         "marks excluded (recorded > 10 min after due): " + ", ".join(f"{k} {v}" for k, v in r.excluded_late.items()),
         "marks missing: " + ", ".join(f"{k} {v}" for k, v in r.missing.items()),
+        f"quote prices: {r.price_sources.get('mid', 0)} from the mid, {r.price_sources.get('last', 0)} from the "
+        f"last trade (spread > {MAX_MID_SPREAD_BPS:g} bps or one-sided)",
         "",
         f"poll latency (first_observed_at - published_at): p50 {_f(r.latency_p50, '.1f', ' s')}, "
         f"p95 {_f(r.latency_p95, '.1f', ' s')} (n={r.n_filings})",
@@ -275,8 +297,9 @@ def format_report(r: Report) -> str:
 
 
 CSV_COLUMNS = ["accession", "ticker", "form_type", "items", "published_at", "first_observed_at",
-               "poll_latency_s", "in_session", "observe_price", "observe_observed_at", "observe_delay_s",
-               "pre_filing_price", "price_1h", "price_1d", "price_5d",
+               "poll_latency_s", "in_session", "observe_price", "observe_price_source", "observe_observed_at",
+               "observe_delay_s", "pre_filing_price", "price_1h", "price_1h_source", "price_1d",
+               "price_1d_source", "price_5d", "price_5d_source",
                "move_1h_bps", "move_1d_bps", "move_5d_bps", "material", "direction", "event_type"]
 
 
@@ -293,6 +316,7 @@ def csv_rows(records: list[Record]) -> list[dict[str, object]]:
             "first_observed_at": r.first_observed_at.isoformat(),
             "poll_latency_s": round(r.poll_latency_s, 3), "in_session": r.in_session,
             "observe_price": _px(r.observe.price if r.observe else None),
+            "observe_price_source": r.observe.source if r.observe else "",
             "observe_observed_at": r.observe.observed_at.isoformat() if r.observe else "",
             "observe_delay_s": round(r.observe_delay_s, 3) if r.observe_delay_s is not None else "",
             "pre_filing_price": _px(r.pre_filing_price),
@@ -303,6 +327,7 @@ def csv_rows(records: list[Record]) -> list[dict[str, object]]:
             mark = r.marks.get(kind)
             move = r.move_bps(kind)
             row[f"price_{label}"] = _px(mark.price if mark else None)
+            row[f"price_{label}_source"] = mark.source if mark else ""
             row[f"move_{label}_bps"] = round(move, 2) if move is not None else ""
         rows.append(row)
     return rows
@@ -352,8 +377,10 @@ def load_records(s: Session, start: date, end: date) -> list[Record]:
         q = quotes.get((sid, kind))
         if q is None:
             return None
-        price = quote_price(q.bid, q.ask, q.last)
-        return None if price is None else QuotePoint(price, q.first_observed_at, due.get((sid, kind)))
+        price, source = price_and_source(q.bid, q.ask, q.last)
+        if price is None or source is None:
+            return None
+        return QuotePoint(price, q.first_observed_at, due.get((sid, kind)), source)
 
     records = []
     for ev, ticker in events:

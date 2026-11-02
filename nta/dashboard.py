@@ -38,6 +38,7 @@ from nta.verdict import (
     default_window,
     format_report,
     load_records,
+    price_and_source,
     quote_price,
 )
 
@@ -469,14 +470,15 @@ def render_filing(s: Session, event_id: str, now: datetime, *, demo: bool, db_na
         due = sched.get(kind)
         if q is None:
             qrows.append(f"<tr><td>{esc(kind)}</td><td>{esc(ny(due, '%a %m-%d %H:%M:%S'))}</td>"
-                         f"<td class='muted' colspan='6'>{'pending' if due and due > now else 'not recorded'}</td></tr>")
+                         f"<td class='muted' colspan='7'>{'pending' if due and due > now else 'not recorded'}</td></tr>")
             continue
-        price = quote_price(q.bid, q.ask, q.last)
+        price, source = price_and_source(q.bid, q.ask, q.last)
         delay = (q.first_observed_at - due).total_seconds() if due else None
         move = (float((price / obs_price - 1) * 10000) if price and obs_price and kind != QuoteKind.observe else None)
         qrows.append(f"<tr><td>{esc(kind)}</td><td>{esc(ny(due, '%a %m-%d %H:%M:%S'))}</td>"
                      f"<td>{esc(ny(q.first_observed_at, '%a %m-%d %H:%M:%S'))}</td><td class='num'>{_fmt(delay)}s</td>"
                      f"<td class='num'>{esc(px(q.bid))}</td><td class='num'>{esc(px(q.ask))}</td><td class='num'>{esc(px(q.last))}</td>"
+                     f"<td class='num'>{esc(px(price))} <span class='muted'>{esc(source or 'none')}</span></td>"
                      + (_move_cell(move) if kind != QuoteKind.observe else "<td></td>") + "</tr>")
     lab = labels[-1] if labels else None
     label_html = ("<span class='muted'>not labeled</span>" if lab is None else
@@ -499,7 +501,7 @@ def render_filing(s: Session, event_id: str, now: datetime, *, demo: bool, db_na
  <span class="muted">sha256 {esc((ev.raw_hash or '')[:16])}</span></dd>
 </dl></div>
 <div class="panel"><h2>Quotes</h2><div class="scroll"><table><tr><th>kind</th><th>due (NY)</th><th>recorded</th>
-<th class="num">delay</th><th class="num">bid</th><th class="num">ask</th><th class="num">last</th><th class="num">move bps</th></tr>
+<th class="num">delay</th><th class="num">bid</th><th class="num">ask</th><th class="num">last</th><th class="num">price used</th><th class="num">move bps</th></tr>
 {''.join(qrows)}</table></div></div></div>
 <div class="panel"><h2>Document preview{f' · cover page skipped ({skipped} line{"s" if skipped != 1 else ""})' if skipped else ''} · plain text, untrusted</h2>
 <pre>{esc(preview)}</pre></div>"""
