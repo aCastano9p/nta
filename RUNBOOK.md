@@ -77,7 +77,7 @@ uv run pytest -q              # rebuilds the nta_test database from migrations e
 ## Errors
 | Symptom | Meaning | Action |
 |---|---|---|
-| `append-only table X: UPDATE is not allowed` | Code tried to change or delete a stored row. | This is a bug in the caller; rows are never changed. Insert a new row instead (see DECISIONS.md "latest row wins"). |
+| `append-only table X: UPDATE is not allowed` | Code tried to change or delete a stored row. | This is a bug in the caller; rows are never changed. Insert a new row instead (see docs/DECISIONS.md, "latest row wins"). |
 | `Cannot reach test Postgres` (pytest) | DB container not running. | `docker compose up -d`, wait for healthy (`docker compose ps`). |
 | `rejected ... figi_not_found` / `figi_not_common_stock` / `figi_ambiguous` | OpenFIGI could not map the ticker to exactly one US common stock. | Check the ticker spelling (share classes: `BRK.B`). ETFs and ADRs are rejected on purpose. |
 | `rejected ... cik_mismatch` / `ticker_not_in_sec_list` | CSV CIK differs from SEC's ticker list. | Fix the CIK in the CSV (SEC's value is in the detail) and reload. |
