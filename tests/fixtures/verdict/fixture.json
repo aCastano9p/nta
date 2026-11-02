@@ -1,0 +1,30 @@
+{
+  "_doc": "Hand-checked verdict fixture. Times are New York local. moves_bps are signed moves of the mark mid vs the observe mid (observe mid = 100.00). null move = no mark quote. late_marks lists marks recorded 30 min after due (must be excluded). quote_style 'last' = no bid/ask, price in last. Expected answers are in tests/test_verdict.py and were worked out by hand.",
+  "window": {"start": "2026-10-01", "end": "2026-10-30"},
+  "instruments": [
+    {"ticker": "AAPL", "figi": "BBG000B9XRY4", "cik": "0000320193", "name": "Apple Inc."},
+    {"ticker": "MSFT", "figi": "BBG000BPH459", "cik": "0000789019", "name": "Microsoft Corp"}
+  ],
+  "filings": [
+    {"n": 1,  "ticker": "AAPL", "observed": "2026-10-01T10:00:00", "latency_s": 20, "observe_delay_s": 0.5, "items": ["2.02", "9.01"],
+     "label": {"material": true,  "direction": "up",      "event_type": "guidance"},   "moves_bps": {"mark_1h": 50,  "mark_1d": 80,  "mark_5d": 120}, "pre_filing_price": "99.50"},
+    {"n": 2,  "ticker": "MSFT", "observed": "2026-10-02T11:00:00", "latency_s": 30, "observe_delay_s": 0.8, "items": ["8.01"],
+     "label": {"material": true,  "direction": "down",    "event_type": "legal"},      "moves_bps": {"mark_1h": -40, "mark_1d": -60, "mark_5d": -100}},
+    {"n": 3,  "ticker": "AAPL", "observed": "2026-10-05T14:00:00", "latency_s": 10, "observe_delay_s": 6.0, "items": ["1.01"],
+     "label": {"material": true,  "direction": "up",      "event_type": "m_and_a"},    "moves_bps": {"mark_1h": 10,  "mark_1d": 20,  "mark_5d": -30}},
+    {"n": 4,  "ticker": "MSFT", "observed": "2026-10-06T10:30:00", "latency_s": 40, "observe_delay_s": 1.0, "items": ["5.02"],
+     "label": {"material": true,  "direction": "unclear", "event_type": "leadership"}, "moves_bps": {"mark_1h": -5,  "mark_1d": 10,  "mark_5d": 15}},
+    {"n": 5,  "ticker": "AAPL", "observed": "2026-10-07T13:00:00", "latency_s": 25, "observe_delay_s": 1.2, "items": ["2.02"],
+     "label": {"material": true,  "direction": "up",      "event_type": "guidance"},   "moves_bps": {"mark_1h": 100, "mark_1d": 150, "mark_5d": 200}},
+    {"n": 6,  "ticker": "MSFT", "observed": "2026-10-08T15:00:00", "latency_s": 15, "observe_delay_s": 0.4, "items": ["2.03"],
+     "label": {"material": true,  "direction": "down",    "event_type": "financing"},  "moves_bps": {"mark_1h": -20, "mark_1d": -25, "mark_5d": -90}, "late_marks": ["mark_5d"]},
+    {"n": 7,  "ticker": "AAPL", "observed": "2026-10-12T17:30:00", "latency_s": 60, "observe_delay_s": 0.5, "items": ["7.01"],
+     "label": {"material": false, "direction": "unclear", "event_type": "other"},      "moves_bps": {"mark_1h": 5,   "mark_1d": -10, "mark_5d": 3}},
+    {"n": 8,  "ticker": "MSFT", "observed": "2026-10-14T12:00:00", "latency_s": 12, "observe_delay_s": 0.6, "items": ["8.01"], "quote_style": "last",
+     "label": {"material": false, "direction": "unclear", "event_type": "other"},      "moves_bps": {"mark_1h": 2,   "mark_1d": -3,  "mark_5d": 1}},
+    {"n": 9,  "ticker": "AAPL", "observed": "2026-10-19T11:00:00", "latency_s": 18, "observe_delay_s": 0.7, "items": ["5.02"],
+     "label": {"material": false, "direction": "unclear", "event_type": "leadership"}, "moves_bps": {"mark_1h": -1,  "mark_1d": 4,   "mark_5d": -2}},
+    {"n": 10, "ticker": "MSFT", "observed": "2026-10-30T10:00:00", "latency_s": 22, "observe_delay_s": 0.9, "items": ["5.07"],
+     "label": {"material": false, "direction": "unclear", "event_type": "other"},      "moves_bps": {"mark_1h": 0,   "mark_1d": 1,   "mark_5d": null}}
+  ]
+}

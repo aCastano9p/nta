@@ -55,6 +55,12 @@ uv run nta label --start 2026-11-02 --end 2026-12-14     # your window dates; se
 ```
 Quit any time with `q` (or Ctrl-D); run the same command again to resume where you stopped. Keep the seed fixed.
 
+## Verdict
+```sh
+uv run nta verdict --start 2026-11-02 --end 2026-12-14   # prints the report; last line is VERDICT: CONTINUE or STOP
+```
+Writes the per-filing table to `exports/verdict_<start>_<end>.csv` (`--csv PATH` to change, `--no-csv` to skip). Run it after labeling; before that it reports "no labeled filings" and STOP.
+
 ## Tests
 ```sh
 docker compose up -d

@@ -72,3 +72,15 @@ Choices the brief left open. Newest at the bottom of each section.
 - **Terminal safety:** filing text has C0/C1 control characters (including ESC), zero-width characters and bidi overrides removed before printing.
 - **Answers:** material y/n; direction only asked when material (non-material is stored as `unclear`); event_type always asked (number 1-7 or name); note optional. `s` skips (asked again next session), `q` or Ctrl-D quits. Item numbers are shown with their official titles.
 - **Labels are rows, never edits.** Relabeling (not exposed in the CLI) would append a row; the verdict uses the latest label per filing.
+
+## Verdict
+- **Window** = New York dates of `first_observed_at`, inclusive; default first to last stored filing. `--start/--end` override.
+- **Price** = mid if both bid and ask are usable, else last.
+- **Move** = mark price / observe price - 1, in bps; stats use the absolute value, the CSV keeps the sign. A quote recorded more than 10 minutes after its due time is not used (counted as "excluded"); a mark with no quote is "missing". Both counts are printed.
+- **Percentiles** use linear interpolation between closest ranks (numpy's default); IQR = p25-p75.
+- **Material filings per month** = filings observed in the window x material share of the labeled sample x 30.4375 / window calendar days. Interval = 95% Wilson interval of the share, scaled the same way (no finite-population correction, so it is slightly conservative when the sample is a large part of the window).
+- **The disproof condition uses point estimates**, verbatim: STOP if the median |1d move| of labeled-material filings < 30 bps, or material filings per month < 60. If either quantity cannot be computed (no labels, no usable 1-day moves), the verdict is STOP with the reason printed: the idea has not shown it clears the bar.
+- **"Observe quote > 5 s after first_observed_at" is reported over filings observed during market hours.** Filings first seen outside hours have their observe quote at the next open by design, so they would all count as late; they are reported as a separate count.
+- **Splits** by event_type and direction are over material filings; "all filings" and "labeled" rows are added for context.
+- **CSV** goes to `exports/verdict_<start>_<end>.csv` by default (git-ignored); prices with 4 decimals; includes `pre_filing_price` (last periodic quote before the filing) so the overnight gap can be studied later.
+- **Fixture first:** `tests/fixtures/verdict/fixture.json` (10 filings) with the expected answers worked out by hand in `tests/test_verdict.py`'s docstring. The code matched all of them on its first run.

@@ -236,3 +236,27 @@ def label_cmd(
     run_session(make_session_factory(make_engine()), SystemClock(), seed=seed, target=target,
                 start=date.fromisoformat(start) if start else None,
                 end=date.fromisoformat(end) if end else None)
+
+
+@app.command("verdict")
+def verdict_cmd(
+    start: str | None = typer.Option(None, help="Window start (YYYY-MM-DD, New York date). Default: first filing."),
+    end: str | None = typer.Option(None, help="Window end, inclusive. Default: last filing."),
+    csv_path: Path | None = typer.Option(None, "--csv", help="Per-filing CSV path. Default: exports/verdict_<start>_<end>.csv"),
+    no_csv: bool = typer.Option(False, help="Do not write the CSV."),
+) -> None:
+    """Print the phase 0 verdict for a window and export the per-filing table."""
+    from nta import verdict
+    from nta.db import make_engine, make_session_factory
+
+    s_date = date.fromisoformat(start) if start else None
+    e_date = date.fromisoformat(end) if end else None
+    with make_session_factory(make_engine())() as s:
+        if not no_csv and csv_path is None:
+            window = (s_date, e_date)
+            if None in window:
+                dw = verdict.default_window(s) or (date.today(), date.today())
+                window = (s_date or dw[0], e_date or dw[1])
+            csv_path = Path("exports") / f"verdict_{window[0]}_{window[1]}.csv"
+        text, _ = verdict.run(s, s_date, e_date, None if no_csv else csv_path)
+    typer.echo(text)
