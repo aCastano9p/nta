@@ -31,10 +31,12 @@ from nta.broker import (
 from nta.clock import Clock
 from nta.decide import (
     CENT,
+    FINAL_ORDER_EVENTS,
     DecisionContent,
     QuoteView,
     Versions,
     has_pending_close,
+    last_close_at,
     load_kill_state,
     load_positions,
     reference_price,
@@ -62,6 +64,8 @@ from nta.schema import (
 
 PROCESS = "risk"
 MAX_DECISION_AGE = timedelta(seconds=30)
+MAX_APPROVAL_AGE = timedelta(seconds=30)
+CLOSE_RETRY = timedelta(seconds=60)
 RECONCILE_EVERY_S = 30.0
 # An order is "sent" (the executor is done with it) after one of these events.
 SEND_FINAL = ("submitted", "found_on_lookup", "broker_rejected", "hmac_invalid", "blocked", "no_trade_decision")
@@ -115,6 +119,19 @@ def open_incidents(s: Session) -> list[Incident]:
 
 def write_kill(s: Session, state: KillState, actor: str, reason: str, at: datetime, incident_id: str | None = None) -> None:
     s.add(KillSwitchEvent(state=state, actor=actor, reason=reason, at=at, incident_id=incident_id))
+
+
+def working_remainders(s: Session, side: Side) -> dict[str, Decimal]:
+    """Unfilled quantity per symbol of signed orders on `side` that are not finished: approved
+    entries count against caps before they fill, working sells against what may still be sold."""
+    done = exists().where(and_(OrderEvent.order_id == Order.id, OrderEvent.event.in_(FINAL_ORDER_EVENTS)))
+    out: dict[str, Decimal] = {}
+    for oid, sym, qty in s.execute(select(Order.id, Order.symbol, Order.qty).where(Order.side == side, ~done)):
+        filled = s.scalar(select(func.coalesce(func.max(Fill.cum_qty), 0)).where(Fill.order_id == oid)) or 0
+        rem = Decimal(qty) - Decimal(filled)
+        if rem > 0:
+            out[sym] = out.get(sym, Decimal(0)) + rem
+    return out
 
 
 class RiskService:
@@ -203,6 +220,8 @@ class RiskService:
                 reasons.append("price_below_stop")
         acct = self.broker.account()
         positions = {k: v for k, v in self.broker.positions().items() if v != 0}
+        for sym, rem in working_remainders(s, Side.buy).items():  # approved, not yet filled
+            positions[sym] = positions.get(sym, Decimal(0)) + rem
         checks.update(equity=str(acct.equity), last_equity=str(acct.last_equity))
         if acct.equity <= acct.last_equity * (1 - p.daily_loss_stop_pct / 100):
             reasons.append("daily_loss_stop")
@@ -246,8 +265,9 @@ class RiskService:
         held_log = next((pos.qty for pos in load_positions(s, now, self.policy)
                          if pos.entry_decision_id == d.parent_decision_id), Decimal(0))
         held_broker = self.broker.positions().get(d.symbol, Decimal(0))
-        qty = int(min(Decimal(d.qty), held_log, max(held_broker, Decimal(0))))
-        checks.update(held_log=str(held_log), held_broker=str(held_broker))
+        selling = working_remainders(s, Side.sell).get(d.symbol, Decimal(0))  # e.g. a flatten and a stop at once
+        qty = int(min(Decimal(d.qty), held_log - selling, max(held_broker - selling, Decimal(0))))
+        checks.update(held_log=str(held_log), held_broker=str(held_broker), working_sells=str(selling))
         if qty < 1:
             reasons.append("no_position")
         q = self.quotes(d.symbol)
@@ -310,6 +330,7 @@ class RiskService:
         with self.sf() as s:
             dec = s.execute(select(Decision.outcome, Decision.kind).where(Decision.id == order.decision_id)).first()
             kill = load_kill_state(s, self.clock.now())
+            approved_at = s.scalar(select(RiskReview.reviewed_at).where(RiskReview.decision_id == order.decision_id))
         if not verify_order(self._key, order.decision_id, order.side.value, order.qty, order.limit_price, order.hmac):
             self._event(order, "hmac_invalid")
             with self.sf() as s, s.begin():
@@ -328,6 +349,11 @@ class RiskService:
         if found is not None:
             self._event(order, "found_on_lookup", found)
             return "found_on_lookup"
+        now = self.clock.now()
+        if not self._market_open(now) or approved_at is None or now - approved_at > MAX_APPROVAL_AGE:
+            # approved, then risk was down: the approval no longer describes the market
+            self._event(order, "blocked", reason="stale_approval" if self._market_open(now) else "market_closed")
+            return "blocked"
         self._event(order, "submit_attempt")
         try:
             b = self.broker.submit_order(client_order_id=order.client_order_id, symbol=order.symbol,
@@ -436,9 +462,18 @@ class RiskService:
     def flatten(self, now: datetime) -> int:
         """Write a close decision for every open position without a pending close."""
         written = 0
+        if not self._market_open(now):
+            return 0  # a close cannot fill; flatten resumes at the open
         with self.sf() as s:
             positions = [p for p in load_positions(s, now, self.policy) if p.qty > 0]
-            todo = [p for p in positions if p.entry_decision_id and not has_pending_close(s, p.entry_decision_id)]
+            todo = []
+            for p in positions:
+                if not p.entry_decision_id or has_pending_close(s, p.entry_decision_id):
+                    continue
+                last = last_close_at(s, p.entry_decision_id)
+                if last is not None and now - last < CLOSE_RETRY:
+                    continue  # a close was just rejected or died: retry after a minute, not every tick
+                todo.append(p)
             entries = {r.id: _d(r) for r in s.execute(select(*DECISION_COLUMNS).where(
                 Decision.id.in_([p.entry_decision_id for p in todo])))} if todo else {}
         for p in todo:
@@ -466,23 +501,11 @@ class RiskService:
     def reconcile(self) -> bool:
         """Compare account T's positions and open orders with the log; write a snapshot.
         Any mismatch raises an incident, which sets PAUSE. Returns True if it matched."""
-        self.sync_orders()  # record fills that happened since the last tick first
-        now = self.clock.now()
-        acct = self.broker.account()
-        broker_pos = {k: v for k, v in self.broker.positions().items() if v != 0}
-        broker_open = self.broker.open_orders()
-        with self.sf() as s:
-            log_pos = self.log_positions_by_symbol(s, now)
-            known = set(s.scalars(select(Order.client_order_id).where(
-                Order.client_order_id.in_([o.client_order_id for o in broker_open])))) if broker_open else set()
-        problems: dict[str, Any] = {}
-        for sym in sorted(set(broker_pos) | set(log_pos)):
-            if broker_pos.get(sym, Decimal(0)) != log_pos.get(sym, Decimal(0)):
-                problems.setdefault("positions", {})[sym] = {"broker": qty_str(broker_pos.get(sym, 0)),
-                                                             "log": qty_str(log_pos.get(sym, 0))}
-        unknown = [o.client_order_id or o.id for o in broker_open if o.client_order_id not in known]
-        if unknown:
-            problems["unknown_open_orders"] = unknown
+        self.resolve_in_flight()  # an order the broker took before we recorded it is ours
+        problems, acct, broker_pos, broker_open, log_pos = self._compare()
+        if problems:  # a fill can land between the order sync and the positions read: look again once
+            problems, acct, broker_pos, broker_open, log_pos = self._compare()
+        now = self.clock.now()  # stamped after the broker reads, just before the insert
         with self.sf() as s, s.begin():
             s.add(PositionSnapshot(account="T", taken_at=now, equity=acct.equity, last_equity=acct.last_equity,
                                    cash=acct.cash, positions={k: qty_str(v) for k, v in broker_pos.items()},
@@ -494,6 +517,35 @@ class RiskService:
         log("reconciled", mismatch=bool(problems), equity=str(acct.equity), positions=len(broker_pos),
             open_orders=len(broker_open), **({"problems": problems} if problems else {}))
         return not problems
+
+    def resolve_in_flight(self) -> None:
+        """Unsent orders that already had a submit attempt may be at the broker: look them up."""
+        with self.sf() as s:
+            tried = [o for o in self.unsent_orders(s) if s.scalar(select(func.count()).select_from(OrderEvent).where(
+                OrderEvent.order_id == o.id, OrderEvent.event == "submit_attempt"))]
+        for o in tried:
+            found = self.broker.get_by_client_order_id(o.client_order_id)
+            if found is not None:
+                self._event(o, "found_on_lookup", found, after="reconcile")
+
+    def _compare(self):  # noqa: ANN202
+        self.sync_orders()  # record fills that happened since the last tick first
+        acct = self.broker.account()
+        broker_pos = {k: v for k, v in self.broker.positions().items() if v != 0}
+        broker_open = self.broker.open_orders()
+        with self.sf() as s:
+            log_pos = self.log_positions_by_symbol(s, self.clock.now())
+            known = set(s.scalars(select(Order.client_order_id).where(
+                Order.client_order_id.in_([o.client_order_id for o in broker_open])))) if broker_open else set()
+        problems: dict[str, Any] = {}
+        for sym in sorted(set(broker_pos) | set(log_pos)):
+            if broker_pos.get(sym, Decimal(0)) != log_pos.get(sym, Decimal(0)):
+                problems.setdefault("positions", {})[sym] = {"broker": qty_str(broker_pos.get(sym, 0)),
+                                                             "log": qty_str(log_pos.get(sym, 0))}
+        unknown = [o.client_order_id or o.id for o in broker_open if o.client_order_id not in known]
+        if unknown:
+            problems["unknown_open_orders"] = unknown
+        return problems, acct, broker_pos, broker_open, log_pos
 
     def reconcile_if_due(self) -> bool:
         """On startup nothing is sent until one reconcile has completed; afterwards every 30 s.
@@ -515,9 +567,9 @@ class RiskService:
         """Account D is data-only. Any order or position there is a severity-1 incident."""
         if self.watchdog is None:
             return True
-        now = self.clock.now()
         pos = {k: v for k, v in self.watchdog.positions().items() if v != 0}
         orders = self.watchdog.open_orders()
+        now = self.clock.now()
         bad = bool(pos or orders)
         with self.sf() as s, s.begin():
             s.add(PositionSnapshot(account="D", taken_at=now, positions={k: qty_str(v) for k, v in pos.items()},

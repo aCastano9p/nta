@@ -115,14 +115,16 @@ def test_fallback_to_periodic_then_bars(connection, session, session_factory) ->
     class Bars:
         def first_bar_close(self, symbol, after):
             return (after + timedelta(minutes=1), Decimal("200"))
-    r = replay(connection, session_factory, bars=Bars(), schema="replay_bars01")
+    r = replay(connection, session_factory, schema="replay_rec01")       # recorded mode: no fallback, like live
+    assert r.quotes_used["none"] == 1 and r.decisions[0].reasons == ("quote_missing",)
+    r = replay(connection, session_factory, bars=Bars(), schema="replay_bars01", simulate=True)
     [c] = r.decisions
     assert r.quotes_used["bar"] == 1 and c.quote["uncertain"] is True and c.quote["source"] == "alpaca_bars"
     with session_factory() as s, s.begin():
         t = MARKET_T + timedelta(minutes=2)
         s.add(Quote(instrument_id=inst.id, ts=t, first_observed_at=t, last=Decimal("200.1"), source="alpaca_iex",
                     kind=QuoteKind.periodic))
-    r = replay(connection, session_factory, schema="replay_per01")
+    r = replay(connection, session_factory, schema="replay_per01", simulate=True)
     assert r.quotes_used["periodic"] == 1 and r.decisions[0].quote["uncertain"] is False
 
 

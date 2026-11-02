@@ -8,8 +8,9 @@
 - Never calls the LLM: the gateway is cache-only and a miss raises CacheMiss.
 - Source events are fed in first_observed_at order; the 72 h before the window are replayed
   as signals only, so clusters and repeats match live.
-- Quotes: the recorded decision quote; else the first periodic quote within 5 minutes after
-  the event; else (optional) a 1-minute bar, flagged uncertain.
+- Quotes: the recorded decision quote (recorded mode: nothing else, like live); in
+  counterfactual mode also the first periodic quote within 5 minutes after the event, then
+  (optional) a 1-minute bar, flagged uncertain.
 - Recorded mode (same policy): exposure from recorded fills and snapshots; position closes
   re-derived from the recorded manage quotes; every decision's content hash is compared
   with the live one.
@@ -108,17 +109,24 @@ class AlpacaBars:
 
 
 class RecordedQuotes:
-    def __init__(self, sf: sessionmaker[Session], bars: BarSource | None = None) -> None:
-        self.sf, self.bars = sf, bars
+    """Recorded mode (fallback=False): exactly the decision quote live stored (the last one,
+    which is the one live decided on), else none, like live. Counterfactual mode adds the
+    periodic and bar fallbacks for events live never quoted."""
+
+    def __init__(self, sf: sessionmaker[Session], bars: BarSource | None = None, fallback: bool = True) -> None:
+        self.sf, self.bars, self.fallback = sf, bars, fallback
         self.used = {"decision": 0, "periodic": 0, "bar": 0, "none": 0}
 
     def decision_quote(self, ev: SourceEvent, symbol: str, instrument_id: str) -> QuoteView | None:
         with self.sf() as s:
             q = s.scalars(select(Quote).where(Quote.source_event_id == ev.id, Quote.kind == QuoteKind.decision)
-                          .order_by(Quote.first_observed_at, Quote.id).limit(1)).first()
+                          .order_by(Quote.first_observed_at.desc(), Quote.id.desc()).limit(1)).first()
             if q is not None:
                 self.used["decision"] += 1
                 return quote_view(q)
+            if not self.fallback:
+                self.used["none"] += 1
+                return None
             q = s.scalars(select(Quote).where(Quote.instrument_id == instrument_id, Quote.kind == QuoteKind.periodic,
                                               Quote.first_observed_at >= ev.first_observed_at,
                                               Quote.first_observed_at <= ev.first_observed_at + PERIODIC_FALLBACK)
@@ -238,7 +246,7 @@ def run_replay(sf: sessionmaker[Session], *, run_id: str, schema: str, start: da
     lo, hi = window_bounds(start, end)
     clock = ReplayClock(lo)
     gateway = LlmGateway(sf, clock, backend=None, replay=True)
-    quotes = RecordedQuotes(sf, bars)
+    quotes = RecordedQuotes(sf, bars, fallback=simulate)
     book = None
     exposure_fn = None
     if simulate:

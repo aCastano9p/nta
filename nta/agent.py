@@ -265,7 +265,8 @@ class Pipeline:
         if needs_quote(sv):
             assert sv.symbol and sv.instrument_id
             q = self.quotes.decision_quote(ev, sv.symbol, sv.instrument_id)
-            as_of = q.observed_at if q else self.clock.now()
+            # No quote: decide as of the event's first observation, a time replay also knows.
+            as_of = q.observed_at if q else ev.first_observed_at
             with self.sf() as s:
                 m = self.market_inputs(s, sv, q, as_of)
                 snap = data_snapshot(s, as_of)

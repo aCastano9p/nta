@@ -136,10 +136,11 @@ class QuoteView:
 class Position:
     symbol: str
     qty: Decimal
-    cost: Decimal           # cost basis (qty x average fill price)
+    cost: Decimal           # cost basis (qty x average fill price); planned cost when pending
     sector: str
     cluster_id: str | None
     entry_decision_id: str | None = None
+    pending: bool = False   # a trade entry not (fully) filled yet: counts against caps
 
 
 @dataclass(frozen=True)
@@ -157,8 +158,9 @@ class Exposure:
     def as_json(self) -> dict[str, Any]:
         return {"equity": _s(self.equity),
                 "positions": [{"symbol": p.symbol, "qty": _s(p.qty), "cost": _s(p.cost), "sector": p.sector,
-                               "cluster_id": p.cluster_id} for p in sorted(self.positions, key=lambda p: p.symbol)],
-                "open_positions": len(self.positions)}
+                               "cluster_id": p.cluster_id, "pending": p.pending}
+                              for p in sorted(self.positions, key=lambda p: (p.symbol, p.pending))],
+                "open_positions": len({p.symbol for p in self.positions})}
 
 
 # ---------- small helpers ----------
@@ -346,7 +348,7 @@ def size_and_plan(*, side: Side, ref: Decimal, atr: Decimal | None, equity: Deci
             qty = allowed
             capped.append(name)
 
-    open_symbols = {p.symbol for p in exposure.positions}
+    open_symbols = {p.symbol for p in exposure.positions}  # pending entries count as open
     if symbol not in open_symbols and len(open_symbols) >= policy.max_open_positions:
         qty, capped = 0, capped + ["max_open_positions"]
     cap("position", equity * policy.position_cap_pct / pct - exposure.by("symbol").get(symbol, Decimal(0)))
@@ -635,8 +637,43 @@ def load_positions(s: Session, as_of: datetime, policy: Policy) -> tuple[Positio
                           clusters.get(e), e) for e in sorted(open_ids))
 
 
+FINAL_ORDER_EVENTS = ("terminal", "broker_rejected", "blocked", "hmac_invalid", "no_trade_decision")
+PENDING_ENTRY_WINDOW = timedelta(minutes=5)
+
+
+def load_pending_entries(s: Session, as_of: datetime, policy: Policy) -> tuple[Position, ...]:
+    """Trade entries decided in the last 5 minutes whose quantity is not filled yet and that
+    were not rejected or finished by as_of. Without them, two decisions seconds apart would
+    each see the cap as free. Recorded data only, so replay sees the same."""
+    d = LIVE_DECISIONS.c
+    out = []
+    for dec_id, symbol, cluster_id, qty, plan in s.execute(
+            select(d.id, d.symbol, d.cluster_id, d.qty, d.plan).where(
+                # strictly earlier: a decision is never its own pending entry (in replay, the live
+                # twin of the decision being replayed has decided_at == as_of)
+                d.kind == "entry", d.outcome == "trade", d.decided_at < as_of,
+                d.decided_at > as_of - PENDING_ENTRY_WINDOW).order_by(d.decided_at, d.id)):
+        verdict = s.scalar(select(RiskReview.verdict).where(RiskReview.decision_id == dec_id,
+                                                            RiskReview.reviewed_at <= as_of))
+        if verdict == RiskVerdict.reject:
+            continue
+        order = s.execute(select(Order.id, Order.qty).where(Order.decision_id == dec_id)).first()
+        if order is not None and s.scalar(select(func.count()).select_from(OrderEvent).where(
+                OrderEvent.order_id == order[0], OrderEvent.event.in_(FINAL_ORDER_EVENTS),
+                OrderEvent.first_observed_at <= as_of)):
+            continue
+        planned = Decimal(order[1] if order is not None else qty or 0)
+        filled = Decimal(s.scalar(select(func.coalesce(func.sum(Fill.qty), 0)).where(
+            Fill.decision_id == dec_id, Fill.first_observed_at <= as_of)) or 0)
+        rem = planned - filled
+        if rem > 0 and symbol and plan:
+            out.append(Position(symbol, rem, (rem * Decimal(plan["entry"])).quantize(CENT, ROUND_HALF_UP),
+                                policy.sector(symbol), cluster_id, dec_id, pending=True))
+    return tuple(out)
+
+
 def load_exposure(s: Session, as_of: datetime, policy: Policy) -> Exposure:
-    return Exposure(load_equity(s, as_of), load_positions(s, as_of, policy))
+    return Exposure(load_equity(s, as_of), load_positions(s, as_of, policy) + load_pending_entries(s, as_of, policy))
 
 
 def data_snapshot(s: Session, as_of: datetime) -> str | None:
