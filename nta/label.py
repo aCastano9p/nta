@@ -10,6 +10,7 @@ bidi-override characters before it is printed, so it cannot drive the terminal.
 """
 
 import hashlib
+import math
 import re
 import textwrap
 from collections.abc import Callable
@@ -266,4 +267,86 @@ def run_session(sf: sessionmaker[Session], clock: Clock, *, seed: int = DEFAULT_
     except EOFError:
         print_fn("")
     print_fn(f"labeled {written} this session; {done_before + written}/{len(sample)} done.")
+    return written
+
+
+# ---------- review mode: human grades of decisions (outcome hidden) ----------
+
+REVIEW_SHARE = 0.2
+
+
+def choose_review(graded: list[tuple[str, bool]], seed: int, share: float = REVIEW_SHARE) -> list[str]:
+    """A seeded random `share` of LLM-graded decisions (ranked like the labeling sample, so a
+    session resumes in the same order), plus every decision whose LLM grade has a zero."""
+    ids = [d for d, _ in graded]
+    k = math.ceil(len(ids) * share)
+    picked = set(sorted(ids, key=lambda d: sample_rank(seed, d))[:k])
+    picked |= {d for d, zero in graded if zero}
+    return sorted(picked, key=lambda d: sample_rank(seed, d))
+
+
+def render_packet(packet: dict) -> str:
+    """The frozen packet as text, sanitized for the terminal. No P&L, fills or later quotes."""
+    d, ev, sig = packet["decision"], packet["source_event"], packet.get("signal") or {}
+    ex = sig.get("extraction") or {}
+    lines = [
+        "=" * 72,
+        f"{d['symbol']}  {ev['form_type'] or ev['source']}  items {', '.join(ev.get('items') or []) or '-'}  "
+        f"first seen {ev['first_observed_at']}",
+        f"decision: {d['outcome']}  reasons: {', '.join(d['reasons']) or '-'}  qty: {d['qty']}",
+    ]
+    if d.get("plan"):
+        p = d["plan"]
+        lines.append(f"plan: entry {p.get('entry')}  stop {p.get('stop')}  take-profit {p.get('take_profit')}  "
+                     f"expiry {p.get('expiry')}")
+    lines.append(f"signal: {sig.get('event_type')}  corroborated {sig.get('corroborated')}  "
+                 f"repeat {sig.get('is_repeat')}  flags {sig.get('flags')}")
+    if ex:
+        lines += [f"direction {ex.get('direction')}  p_up {ex.get('p_up_at_horizon')}",
+                  f"thesis: {ex.get('thesis')}", f"contrary: {ex.get('contrary_evidence')}",
+                  f"invalidation: {ex.get('invalidation')}"]
+    lines.append("-" * 72)
+    lines += (ev.get("text") or "").splitlines()[:40]
+    return sanitize("\n".join(textwrap.fill(line, WRAP) if len(line) > WRAP else line for line in lines))
+
+
+def run_review(sf: sessionmaker[Session], clock: Clock, *, seed: int = DEFAULT_SEED,
+               input_fn: Callable[[str], str] = input, print_fn: Callable[[str], None] = print) -> int:
+    from nta.evaluate import CRITERIA, latest_grades
+    from nta.schema import Grade, Grader, Postmortem
+
+    with sf() as s:
+        grades = latest_grades(s)
+        graded = [(d, g[Grader.llm].has_zero) for d, g in grades.items() if Grader.llm in g]
+        packets = {p.decision_id: p for p in s.scalars(select(Postmortem))}
+    queue = [d for d in choose_review(graded, seed) if d in packets]
+    todo = [d for d in queue if Grader.human not in grades.get(d, {})]
+    print_fn(f"review: {len(queue)} decisions ({len(graded)} LLM-graded, seed {seed}); {len(todo)} to go. "
+             "Scores 0-2; q to stop.")
+    written = 0
+
+    def parse_score(ans: str) -> int | str | None:
+        a = ans.strip().lower()
+        if a in ("q", "quit"):
+            return "quit"
+        return int(a) if a in ("0", "1", "2") else None
+
+    try:
+        for d in todo:
+            pm = packets[d]
+            print_fn(render_packet(pm.packet))
+            scores: dict[str, int] = {}
+            for c in CRITERIA:
+                v = _ask(f"{c}? [0/1/2, q=quit] ", parse_score, input_fn, print_fn)
+                if v == "quit":
+                    raise EOFError
+                scores[c] = int(v)  # type: ignore[arg-type]
+            with sf() as s, s.begin():
+                s.add(Grade(decision_id=d, grader=Grader.human, scores=scores, total=sum(scores.values()),
+                            has_zero=0 in scores.values(), packet_hash=pm.packet_hash, llm_call_id=None,
+                            graded_at=clock.now()))
+            written += 1
+    except EOFError:
+        print_fn("")
+    print_fn(f"graded {written} this session.")
     return written

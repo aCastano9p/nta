@@ -75,6 +75,21 @@ def parse_snapshots(payload: dict) -> dict[str, Snapshot]:
     return out
 
 
+@dataclass(frozen=True)
+class Bar:
+    t: datetime
+    close: Decimal
+
+
+def parse_bars(payload: dict) -> tuple[list[Bar], str | None]:
+    bars = []
+    for b in (payload.get("bars") or []) if isinstance(payload, dict) else []:
+        t, c = _ts(b.get("t")), _price(b.get("c"))
+        if t is not None and c is not None:
+            bars.append(Bar(t, c))
+    return bars, payload.get("next_page_token") if isinstance(payload, dict) else None
+
+
 def alpaca_symbol(ticker: str) -> str:
     return ticker.replace("/", ".").replace("-", ".")
 
@@ -106,6 +121,27 @@ class AlpacaData:
         resp.raise_for_status()
         return parse_snapshots(resp.json())
 
+    def bars(self, symbol: str, start: datetime, end: datetime, timeframe: str = "1Min") -> list[Bar]:
+        """Historical bars (data API). Used for the SPY benchmark and replay's last-resort prices."""
+        out: list[Bar] = []
+        token = None
+        while True:
+            params = {"timeframe": timeframe, "start": start.isoformat(), "end": end.isoformat(), "feed": self.feed,
+                      "limit": 10000, "adjustment": "raw"}
+            if token:
+                params["page_token"] = token
+            req = self._http.build_request("GET", f"{self._base}/v2/stocks/{symbol}/bars", params=params,
+                                           headers=self._headers)
+            with self._count_lock:
+                self.requests += 1
+            resp = send_with_retry(self._http, req, bucket=self._bucket, clock=self._clock,
+                                   max_attempts=4, base_delay=0.25, max_delay=5.0)
+            resp.raise_for_status()
+            page, token = parse_bars(resp.json())
+            out.extend(page)
+            if not token:
+                return out
+
     def snapshots(self, symbols: Sequence[str]) -> dict[str, Snapshot]:
         """Latest snapshot per symbol. Chunks of 100 symbols are fetched concurrently
         (httpx.Client and the token bucket are thread-safe); any chunk error is raised."""
@@ -119,3 +155,4 @@ class AlpacaData:
             for part in pool.map(self._fetch, chunks):
                 out.update(part)
         return out
+

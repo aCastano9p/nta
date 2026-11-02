@@ -429,15 +429,55 @@ def label_cmd(
     target: int = typer.Option(100, help="Sample size."),
     start: str | None = typer.Option(None, help="Window start (YYYY-MM-DD, New York date of first observation)."),
     end: str | None = typer.Option(None, help="Window end (inclusive)."),
+    review: bool = typer.Option(False, "--review", help="Grade decisions instead: a 20 % sample of LLM-graded decisions plus every one with a zero, outcome hidden."),
 ) -> None:
-    """Label a seeded random sample of stored filings in the terminal."""
+    """Label a seeded random sample of stored filings in the terminal (or --review decisions)."""
     from nta.clock import SystemClock
     from nta.db import make_engine, make_session_factory
-    from nta.label import run_session
+    from nta.label import run_review, run_session
 
+    if review:
+        run_review(make_session_factory(make_engine()), SystemClock(), seed=seed)
+        return
     run_session(make_session_factory(make_engine()), SystemClock(), seed=seed, target=target,
                 start=date.fromisoformat(start) if start else None,
                 end=date.fromisoformat(end) if end else None)
+
+
+@app.command("evaluate")
+def evaluate_cmd(
+    policy_path: Path = typer.Option(None, "--policy", help="Policy file (default policy/policy.yaml)."),
+    no_grade: bool = typer.Option(False, help="Skip the LLM grade (metrics and estimates only)."),
+) -> None:
+    """Grade and measure every decision whose horizon has passed; propose guardrails (rows only)."""
+    import httpx
+
+    from nta.alpaca import AlpacaData
+    from nta.clock import SystemClock
+    from nta.config import ConfigError, alpaca_credentials, anthropic_api_key, assert_agent_env
+    from nta.db import make_engine, make_session_factory
+    from nta.evaluate import AlpacaBenchmark, Evaluator, grade_model_from_env
+    from nta.extract import AnthropicBackend, LlmGateway, daily_usd_from_env
+    from nta.policy import DEFAULT_POLICY_PATH, load_policy
+    from nta.ratelimit import alpaca_bucket
+
+    try:
+        assert_agent_env()
+        key, secret = alpaca_credentials()
+        llm_key = None if no_grade else anthropic_api_key()
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    clock = SystemClock()
+    sf = make_session_factory(make_engine())
+    loaded = load_policy(policy_path or DEFAULT_POLICY_PATH)
+    with httpx.Client(timeout=httpx.Timeout(10.0, connect=3.0)) as http:
+        alpaca = AlpacaData(http, alpaca_bucket(clock), clock, key, secret, feed=loaded.policy.quote_source)
+        gateway = None if llm_key is None else LlmGateway(sf, clock, backend=AnthropicBackend(llm_key),
+                                                          daily_usd=daily_usd_from_env())
+        n = Evaluator(sf, clock, gateway, loaded, grade_model=grade_model_from_env(),
+                      benchmark=AlpacaBenchmark(alpaca)).run()
+    typer.echo(f"evaluated {n} decisions")
 
 
 @app.command("verdict")
