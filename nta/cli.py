@@ -648,7 +648,8 @@ def dashboard_cmd(
         typer.echo("building demo database (synthetic data)...")
         url = recreate_demo_database(url)
     db_name = make_url(url).database or "?"
-    health = {} if demo else {"EDGAR poller": poller_health, "Quote recorder": quotes_health}
+    health = {} if demo else {"EDGAR poller": poller_health, "Quote recorder": quotes_health,
+                              "Agent": "http://127.0.0.1:8767/healthz", "Risk": "http://127.0.0.1:8768/healthz"}
     dash = Dashboard(make_session_factory(make_engine(url)), db_name=db_name, demo=demo,
                      port=port, health_urls=health)
     typer.echo(f"dashboard: http://127.0.0.1:{dash.port}/  (database {db_name}; Ctrl-C to stop)")

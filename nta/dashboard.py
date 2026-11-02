@@ -216,8 +216,10 @@ def page(title: str, body: str, *, demo: bool, db_name: str, refresh: int | None
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">{meta}
 <title>{esc(title)}</title><style>{STYLE}</style></head><body>
-<header><h1>NTA phase 0</h1><nav><a href="/">Overview</a><a href="/verdict">Verdict</a>
-<a href="/verdict.csv">CSV</a></nav><span class="muted">database {esc(db_name)}</span></header>
+<header><h1>NTA</h1><nav><a href="/">Overview</a><a href="/verdict">Verdict</a>
+<a href="/verdict.csv">CSV</a><a href="/loop">Loop</a><a href="/decisions">Decisions</a><a href="/orders">Orders</a>
+<a href="/positions">Positions</a><a href="/incidents">Incidents</a><a href="/estimates">Estimates</a>
+<a href="/spend">Spend</a></nav><span class="muted">database {esc(db_name)}</span></header>
 {banner}<main>{body}</main></body></html>"""
 
 
@@ -541,7 +543,9 @@ class Dashboard:
         self._clock = clock or SystemClock()
         self.db_name, self.demo = db_name, demo
         self.health_urls = {"EDGAR poller": "http://127.0.0.1:8765/healthz",
-                            "Quote recorder": "http://127.0.0.1:8766/healthz"} if health_urls is None else health_urls
+                            "Quote recorder": "http://127.0.0.1:8766/healthz",
+                            "Agent": "http://127.0.0.1:8767/healthz",
+                            "Risk": "http://127.0.0.1:8768/healthz"} if health_urls is None else health_urls
         self._lock = threading.Lock()  # the session factory may share one connection (tests)
         outer = self
 
@@ -588,6 +592,12 @@ class Dashboard:
                 return 200, html_type, render_verdict(s, demo=self.demo, db_name=self.db_name)
             if path == "/verdict.csv":
                 return 200, "text/csv; charset=utf-8", render_csv(s)
+            from nta.dashboard_loop import PAGES
+
+            if path in PAGES:
+                def pg(title: str, body: str) -> str:
+                    return page(title, body, demo=self.demo, db_name=self.db_name, refresh=15)
+                return 200, html_type, PAGES[path](s, now, page=pg)
             if path.startswith("/filing/") and _ID_RE.match(path.removeprefix("/filing/")):
                 out = render_filing(s, path.removeprefix("/filing/"), now, demo=self.demo, db_name=self.db_name)
                 if out is not None:
