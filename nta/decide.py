@@ -17,7 +17,7 @@ from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import MetaData, func, select
 from sqlalchemy.orm import Session
 
 from nta.marketcal import Session as MarketSession
@@ -163,7 +163,16 @@ class Exposure:
 # ---------- small helpers ----------
 
 def _s(v: Decimal | float | int | None) -> str | None:
-    return None if v is None else str(v)
+    """One canonical string per number: Alpaca's Decimal("200") and the stored 200.000000
+    must hash the same, so Decimals are written normalized and fixed-point ("200", "200.2")."""
+    if v is None:
+        return None
+    if isinstance(v, Decimal):
+        return format(v.normalize(), "f")
+    return str(v)
+
+
+num_str = _s
 
 
 def _t(v: datetime | None) -> str | None:
@@ -414,6 +423,29 @@ class DecisionContent:
         return hashlib.sha256(canonical(self.hash_payload()).encode()).hexdigest()
 
 
+def row_payload(d: Any) -> dict[str, Any]:
+    """The hash payload rebuilt from a stored decisions row (a Decision or a Core row), so a
+    replay mismatch can name the fields that differ. sha256(canonical(row_payload)) equals
+    the stored content_hash."""
+    def v(name: str) -> Any:
+        return getattr(d, name)
+    quote = {k: x for k, x in (v("quote") or {}).items() if k != "quote_id"} if v("quote") else None
+    side, outcome = v("side"), v("outcome")
+    ecb = v("expected_cost_bps")
+    return {"kind": getattr(v("kind"), "value", v("kind")), "source_event_id": v("source_event_id"),
+            "instrument_id": v("instrument_id"), "symbol": v("symbol"), "cluster_id": v("cluster_id"),
+            "outcome": getattr(outcome, "value", outcome), "reasons": list(v("reasons") or []),
+            "side": getattr(side, "value", side), "qty": v("qty"), "quote": quote, "exposure": v("exposure"),
+            "plan": v("plan"), "expected_cost_bps": _s(ecb),
+            "spread_unverified": v("spread_unverified"), "hypothetical": v("hypothetical"),
+            "parent_source_event_id": v("source_event_id") if getattr(v("kind"), "value", v("kind")) == "close" else None,
+            "policy_version": v("policy_version"), "prompt_version": v("prompt_version"), "model_id": v("model_id")}
+
+
+def payload_diff(a: dict[str, Any], b: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
+    return {k: (a.get(k), b.get(k)) for k in sorted(set(a) | set(b)) if canonical(a.get(k)) != canonical(b.get(k))}
+
+
 def outcome_for(reasons: list[Reason]) -> Outcome:
     if not reasons:
         return Outcome.trade
@@ -520,6 +552,11 @@ def close_trigger(plan: dict[str, Any], price: Decimal | None, now: datetime) ->
 
 # ---------- point-in-time loaders (shared by live and replay) ----------
 
+# Replay runs with search_path = replay_<id>, public, so the unqualified `decisions` is the
+# replay's own output. Positions are recorded-world data: they must join the live decisions
+# that the recorded fills belong to, hence an explicitly schema-qualified copy.
+LIVE_DECISIONS = Decision.__table__.to_metadata(MetaData(), schema="public")
+
 def quote_view(q: Quote, uncertain: bool = False) -> QuoteView:
     return QuoteView(q.bid, q.ask, q.last, q.ts, q.first_observed_at, q.source, q.id, uncertain)
 
@@ -571,9 +608,9 @@ def load_equity(s: Session, as_of: datetime) -> Decimal | None:
 def load_positions(s: Session, as_of: datetime, policy: Policy) -> tuple[Position, ...]:
     """Open positions from fills observed by as_of, attributed to their entry decision.
     A close decision's fills reduce its parent entry's position."""
-    rows = s.execute(select(Fill.symbol, Fill.side, Fill.qty, Fill.price, Decision.id, Decision.kind,
-                            Decision.parent_decision_id)
-                     .join(Decision, Decision.id == Fill.decision_id)
+    d = LIVE_DECISIONS.c
+    rows = s.execute(select(Fill.symbol, Fill.side, Fill.qty, Fill.price, d.id, d.kind, d.parent_decision_id)
+                     .join(LIVE_DECISIONS, d.id == Fill.decision_id)
                      .where(Fill.first_observed_at <= as_of).order_by(Fill.first_observed_at, Fill.id)).all()
     qty: dict[str, Decimal] = {}
     cost: dict[str, Decimal] = {}
@@ -590,7 +627,7 @@ def load_positions(s: Session, as_of: datetime, policy: Policy) -> tuple[Positio
                 cost[entry] = cost.get(entry, Decimal(0)) * (held - q) / held
             qty[entry] = held - q
     open_ids = [e for e, q in qty.items() if q > 0]
-    clusters = dict(s.execute(select(Decision.id, Decision.cluster_id).where(Decision.id.in_(open_ids))).all()) if open_ids else {}
+    clusters = dict(s.execute(select(d.id, d.cluster_id).where(d.id.in_(open_ids))).all()) if open_ids else {}
     return tuple(Position(symbol[e], qty[e], cost[e].quantize(CENT, ROUND_HALF_UP), policy.sector(symbol[e]),
                           clusters.get(e), e) for e in sorted(open_ids))
 

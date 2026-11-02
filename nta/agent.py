@@ -34,6 +34,7 @@ from nta.cluster import (
 )
 from nta.decide import (
     DecisionContent,
+    Exposure,
     MarketInputs,
     Position,
     QuoteView,
@@ -42,6 +43,7 @@ from nta.decide import (
     close_trigger,
     data_snapshot,
     decide_entry,
+    num_str,
     exit_price,
     has_pending_close,
     last_close_at,
@@ -59,7 +61,7 @@ from nta.label import ITEM_TITLES
 from nta.logs import log
 from nta.marketcal import Session as MarketSession
 from nta.marketcal import is_open, sessions_around
-from nta.policy import LoadedPolicy, SourceKind
+from nta.policy import LoadedPolicy, Policy, SourceKind
 from nta.schema import (
     Decision,
     DecisionKind,
@@ -131,10 +133,11 @@ class Pipeline:
     def __init__(self, *, sf: sessionmaker[Session], clock: Clock, gateway: LlmGateway, models: ModelConfig,
                  policy: LoadedPolicy, quotes: QuoteSource, code_sha: str,
                  source_meta: Callable[[SourceEvent], SourceMeta] = edgar_meta,
-                 sessions_fn: Callable[[datetime], list[MarketSession]] = sessions_around) -> None:
+                 sessions_fn: Callable[[datetime], list[MarketSession]] = sessions_around,
+                 exposure_fn: Callable[[Session, datetime, Policy], Exposure] = load_exposure) -> None:
         self.sf, self.clock, self.gateway, self.models = sf, clock, gateway, models
         self.policy, self.quotes, self.code_sha = policy, quotes, code_sha
-        self.source_meta, self.sessions_fn = source_meta, sessions_fn
+        self.source_meta, self.sessions_fn, self.exposure_fn = source_meta, sessions_fn, exposure_fn
 
     # ---- pass 1: signals ----
     def item_for(self, ev: SourceEvent, inst: Instrument | None) -> tuple[Item, str]:
@@ -215,7 +218,7 @@ class Pipeline:
             as_of=as_of, quote=quote,
             ref_at_observe=load_ref_at_observe(s, sv.instrument_id, sv.source_event_id, sv.first_observed_at, as_of),
             recent_prices=load_recent_prices(s, sv.instrument_id, as_of),
-            exposure=load_exposure(s, as_of, self.policy.policy), kill_state=load_kill_state(s, as_of),
+            exposure=self.exposure_fn(s, as_of, self.policy.policy), kill_state=load_kill_state(s, as_of),
             sessions=self.sessions_fn(as_of))
 
     def decide_signal(self, sig: Signal) -> DecisionContent:
@@ -301,7 +304,7 @@ class PositionManager:
             return None
         with self.p.sf() as s:
             snap = data_snapshot(s, q.observed_at)
-        plan = {"trigger": trigger, "exit_ref": str(price) if price is not None else None,
+        plan = {"trigger": trigger, "exit_ref": num_str(price),
                 "stop": entry.plan["stop"], "take_profit": entry.plan["take_profit"], "expiry": entry.plan["expiry"]}
         c = DecisionContent(kind="close", source_event_id=entry.source_event_id, instrument_id=entry.instrument_id,
                             symbol=entry.symbol, cluster_id=entry.cluster_id, outcome=Outcome.trade, reasons=(trigger,),

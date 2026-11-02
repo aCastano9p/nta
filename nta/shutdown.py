@@ -9,6 +9,8 @@ short slices, so nothing in the handler path takes a lock.
 import signal
 import time
 
+from nta.clock import monotonic
+
 
 class StopFlag:
     def __init__(self, slice_s: float = 0.1) -> None:
@@ -26,9 +28,9 @@ class StopFlag:
         return self._set
 
     def wait(self, timeout: float) -> bool:
-        deadline = time.monotonic() + timeout
+        deadline = monotonic() + timeout
         while not self._set:
-            remaining = deadline - time.monotonic()
+            remaining = deadline - monotonic()
             if remaining <= 0:
                 break
             time.sleep(min(self._slice_s, remaining))
@@ -42,7 +44,7 @@ def install_signal_handlers(flag: StopFlag) -> dict[int, object]:
     Returns the previous handlers so callers (tests) can restore them."""
 
     def handler(signum: int, _frame: object) -> None:
-        now = time.monotonic()
+        now = monotonic()
         if flag.signalled_at is None:
             flag.signalled_at = now
             flag.set(f"signal {signal.Signals(signum).name}")

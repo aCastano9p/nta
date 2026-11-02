@@ -1,6 +1,8 @@
 """`nta` command-line entry point. Subcommands are added per component."""
 
 from datetime import date
+
+from nta.clock import local_today
 from pathlib import Path
 
 import typer
@@ -45,7 +47,7 @@ def db_check() -> None:
 
 
 def _as_of(value: str | None) -> date:
-    return date.fromisoformat(value) if value else date.today()
+    return date.fromisoformat(value) if value else local_today()
 
 
 @allowlist_app.command("load")
@@ -480,6 +482,67 @@ def evaluate_cmd(
     typer.echo(f"evaluated {n} decisions")
 
 
+@app.command("replay")
+def replay_cmd(
+    start: str = typer.Option(..., "--from", help="First New York date (YYYY-MM-DD)."),
+    end: str = typer.Option(..., "--to", help="Last New York date, inclusive."),
+    policy_path: Path = typer.Option(None, "--policy", help="Run the window under this policy too and print both portfolio paths."),
+) -> None:
+    """Replay recorded data through the decision loop (no LLM calls, no live writes)."""
+    from sqlalchemy import create_engine
+
+    from nta.config import alpaca_credentials
+    from nta.db import database_url
+    from nta.extract import model_config_from_env
+    from nta.policy import DEFAULT_POLICY_PATH, load_policy
+    from nta.replay import create_replay_schema, format_paths, format_result, new_run_id, run_replay, schema_name
+    from nta.db import make_session_factory
+
+    s_date, e_date = date.fromisoformat(start), date.fromisoformat(end)
+    url = database_url()
+    models = model_config_from_env()
+    bars = None
+    try:  # optional last-resort price source (data API only)
+        import httpx
+
+        from nta.alpaca import AlpacaData
+        from nta.clock import SystemClock
+        from nta.ratelimit import alpaca_bucket
+        from nta.replay import AlpacaBars
+
+        key, secret = alpaca_credentials()
+        clock = SystemClock()
+        bars = AlpacaBars(AlpacaData(httpx.Client(timeout=10.0), alpaca_bucket(clock), clock, key, secret))
+    except Exception:
+        bars = None
+
+    def one(policy_file: Path, simulate: bool):
+        run_id = new_run_id()
+        schema = schema_name(run_id)
+        admin = create_engine(url, isolation_level="AUTOCOMMIT")
+        with admin.connect() as conn:
+            create_replay_schema(conn, schema)
+        admin.dispose()
+        engine = create_engine(url, connect_args={"options": f"-c search_path={schema},public"})
+        try:
+            return run_replay(make_session_factory(engine), run_id=run_id, schema=schema, start=s_date, end=e_date,
+                              policy=load_policy(policy_file), models=models, simulate=simulate, bars=bars)
+        finally:
+            engine.dispose()
+
+    if policy_path is None:
+        r = one(DEFAULT_POLICY_PATH, simulate=False)
+        typer.echo(format_result(r))
+        if r.comparison is not None and not r.comparison.identical:
+            raise typer.Exit(1)
+        return
+    a = one(DEFAULT_POLICY_PATH, simulate=True)
+    b = one(policy_path, simulate=True)
+    typer.echo(format_result(a))
+    typer.echo(format_result(b))
+    typer.echo(format_paths(a, b, s_date, e_date))
+
+
 @app.command("verdict")
 def verdict_cmd(
     start: str | None = typer.Option(None, help="Window start (YYYY-MM-DD, New York date). Default: first filing."),
@@ -497,7 +560,7 @@ def verdict_cmd(
         if not no_csv and csv_path is None:
             window = (s_date, e_date)
             if None in window:
-                dw = verdict.default_window(s) or (date.today(), date.today())
+                dw = verdict.default_window(s) or (local_today(), local_today())
                 window = (s_date or dw[0], e_date or dw[1])
             csv_path = Path("exports") / f"verdict_{window[0]}_{window[1]}.csv"
         text, _ = verdict.run(s, s_date, e_date, None if no_csv else csv_path)

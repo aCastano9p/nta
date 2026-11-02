@@ -80,8 +80,9 @@ def test_trade_with_hand_computed_plan() -> None:
     assert d.outcome == Outcome.trade and d.reasons == ()
     assert d.side == Side.buy and d.qty == 49
     p = d.plan
-    assert (p["ref_price"], p["entry"], p["stop"], p["take_profit"]) == ("200", "200.20", "198.00", "204.00")
-    assert p["stop_distance"] == "2.00" and p["risk_usd"] == "250.00" and p["capped_by"] == ["position"]
+    # numbers in decision content are written normalized ("200.2", not "200.20"), see num_str
+    assert (p["ref_price"], p["entry"], p["stop"], p["take_profit"]) == ("200", "200.2", "198", "204")
+    assert p["stop_distance"] == "2" and p["risk_usd"] == "250" and p["capped_by"] == ["position"]
     # expiry: 2 trading days later (Friday 11:00 New York)
     assert p["expiry"] == "2026-11-06T16:00:00+00:00"
     # 5 bps assumed spread + 2 x 5 bps slippage + 0.5 bps fees
@@ -95,7 +96,7 @@ def test_atr_widens_the_stop() -> None:
     prices = [(t0 + timedelta(minutes=5 * i), Decimal("200") + (3 if i % 2 else 0)) for i in range(15)]
     assert atr_5m(prices, 14) == Decimal("3.0000")
     d = decide(m=market(recent_prices=prices))
-    assert d.plan["stop"] == "194.00" and d.plan["take_profit"] == "212.00"
+    assert d.plan["stop"] == "194" and d.plan["take_profit"] == "212"
     # shares by risk = 250 / 6 = 41, under the position cap of 49
     assert d.qty == 41 and d.plan["capped_by"] == []
 
@@ -116,7 +117,7 @@ def test_down_is_long_only_with_a_hypothetical_short() -> None:
     d = decide(s=sig(direction="down"))
     assert d.outcome == Outcome.abstain and d.reasons == (Reason.long_only,)
     h = d.hypothetical
-    assert h["side"] == "sell" and h["stop"] == "202.00" and h["take_profit"] == "196.00" and h["entry"] == "199.80"
+    assert h["side"] == "sell" and h["stop"] == "202" and h["take_profit"] == "196" and h["entry"] == "199.8"
 
 
 @pytest.mark.parametrize("m,reason", [

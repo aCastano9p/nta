@@ -7,7 +7,8 @@ part, so id order equals generation order. Code that replays rows "in insertion 
 
 import os
 import threading
-import time
+
+from nta.clock import epoch_ms
 
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _RAND_MAX = (1 << 80) - 1
@@ -27,7 +28,7 @@ def _encode(value: int) -> str:
 
 def new_ulid(now_ms: int | None = None) -> str:
     global _last_ms, _last_rand
-    ms = int(time.time() * 1000) if now_ms is None else now_ms
+    ms = epoch_ms() if now_ms is None else now_ms
     with _lock:
         if ms <= _last_ms:
             ms = _last_ms
