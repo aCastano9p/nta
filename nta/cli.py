@@ -219,3 +219,20 @@ def quotes_cmd(
         if health:
             health.stop()
         stop_run(sf, run_id, stop.reason, clock)
+
+
+@app.command("label")
+def label_cmd(
+    seed: int = typer.Option(7, help="Sampling seed. Keep it fixed so sessions resume in the same order."),
+    target: int = typer.Option(100, help="Sample size."),
+    start: str | None = typer.Option(None, help="Window start (YYYY-MM-DD, New York date of first observation)."),
+    end: str | None = typer.Option(None, help="Window end (inclusive)."),
+) -> None:
+    """Label a seeded random sample of stored filings in the terminal."""
+    from nta.clock import SystemClock
+    from nta.db import make_engine, make_session_factory
+    from nta.label import run_session
+
+    run_session(make_session_factory(make_engine()), SystemClock(), seed=seed, target=target,
+                start=date.fromisoformat(start) if start else None,
+                end=date.fromisoformat(end) if end else None)

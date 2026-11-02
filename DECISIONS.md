@@ -64,3 +64,11 @@ Choices the brief left open. Newest at the bottom of each section.
 - **Missing symbols** (no usable quote or trade in the snapshot) are retried every 5 s, so one bad symbol cannot burn the request budget.
 - **Periodic quotes:** once per 5-minute wall-clock slot (09:30, 09:35, ...) during the regular session, for every instrument in the allowlist that day. After a restart the recorder resumes from the last stored slot, so a slot is not recorded twice.
 - **Market calendar:** `pandas_market_calendars` XNYS (holidays and early closes). Scheduling is pure (`nta/marketcal.py`) and tested across a weekend, Thanksgiving, the following early close and the Nov 1 DST change.
+
+## Labeling tool
+- **Sample = the `target` filings with the smallest `sha256("<seed>:<accession>")`**, labeled in that order. A filing's rank does not depend on which other filings exist, so a session resumes in the same order and the queue is stable. Default seed 7, target 100; `--start/--end` restrict to a window (New York date of first observation). Sample after the window closes: while collection is running, new filings can still enter the top 100.
+- **Population = every stored EDGAR filing in the window** (8-K and 8-K/A).
+- **Preview starts at the first "Item X.XX" heading, not the top of the document.** The first ~60 lines of an 8-K are cover-page boilerplate (seen on a real P&G filing), so a literal "first 60 lines" would rarely show the substance. The tool prints how many cover lines were skipped and falls back to the top if there is no Item heading. HTML is converted to text (scripts, styles and hidden iXBRL headers dropped).
+- **Terminal safety:** filing text has C0/C1 control characters (including ESC), zero-width characters and bidi overrides removed before printing.
+- **Answers:** material y/n; direction only asked when material (non-material is stored as `unclear`); event_type always asked (number 1-7 or name); note optional. `s` skips (asked again next session), `q` or Ctrl-D quits. Item numbers are shown with their official titles.
+- **Labels are rows, never edits.** Relabeling (not exposed in the CLI) would append a row; the verdict uses the latest label per filing.

@@ -48,6 +48,13 @@ curl -s localhost:8766/healthz  # 200 = ticked within 30 s
 ```
 Run it alongside `nta poll edgar`. It schedules observe/mark quotes for every stored filing, records them when due (market hours only), and records a periodic quote for every allowlisted ticker every 5 minutes. Stop with Ctrl-C / SIGTERM; restarts lose nothing (the schedule is in `quote_schedule`).
 
+## Labeling
+After the 30-day window closes:
+```sh
+uv run nta label --start 2026-11-02 --end 2026-12-14     # your window dates; seed 7, 100 filings by default
+```
+Quit any time with `q` (or Ctrl-D); run the same command again to resume where you stopped. Keep the seed fixed.
+
 ## Tests
 ```sh
 docker compose up -d
