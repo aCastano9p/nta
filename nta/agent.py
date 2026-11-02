@@ -35,13 +35,19 @@ from nta.cluster import (
 from nta.decide import (
     DecisionContent,
     MarketInputs,
+    Position,
     QuoteView,
     SignalView,
     Versions,
+    close_trigger,
     data_snapshot,
     decide_entry,
+    exit_price,
+    has_pending_close,
+    last_close_at,
     load_exposure,
     load_kill_state,
+    load_positions,
     load_recent_prices,
     load_ref_at_observe,
     needs_quote,
@@ -52,9 +58,20 @@ from nta.extract import ExtractResult, Item, LlmGateway, ModelConfig, document_t
 from nta.label import ITEM_TITLES
 from nta.logs import log
 from nta.marketcal import Session as MarketSession
-from nta.marketcal import sessions_around
+from nta.marketcal import is_open, sessions_around
 from nta.policy import LoadedPolicy, SourceKind
-from nta.schema import Decision, DecisionKind, Instrument, Quote, QuoteKind, Signal, SourceEvent
+from nta.schema import (
+    Decision,
+    DecisionKind,
+    Instrument,
+    KillState,
+    Outcome,
+    Quote,
+    QuoteKind,
+    Side,
+    Signal,
+    SourceEvent,
+)
 
 DEFAULT_LOOKBACK = timedelta(hours=24)
 
@@ -73,6 +90,7 @@ def edgar_meta(_ev: SourceEvent) -> SourceMeta:
 
 class QuoteSource(Protocol):
     def decision_quote(self, ev: SourceEvent, symbol: str, instrument_id: str) -> QuoteView | None: ...
+    def manage_quote(self, source_event_id: str, symbol: str, instrument_id: str) -> QuoteView | None: ...
 
 
 class LiveQuotes:
@@ -240,6 +258,76 @@ class Pipeline:
             self.decide_signal(sig)
             decisions += 1
         return signals, decisions
+
+
+class PositionManager:
+    """Watches every open position's plan (stop, take-profit, expiry) and writes a close
+    decision when one triggers. The close goes through nta risk like any order.
+
+    Runs during market hours only (a close cannot fill otherwise). Keeps running under PAUSE
+    and FLATTEN; stands down under HALT (nta risk would refuse anyway). After a close
+    decision, the same position is not re-closed for `retry_after` unless that close is
+    still pending, so a rejected close is retried without spamming.
+    """
+
+    def __init__(self, pipeline: Pipeline, *, every: timedelta = timedelta(seconds=5),
+                 retry_after: timedelta = timedelta(seconds=60)) -> None:
+        self.p = pipeline
+        self.every, self.retry_after = every, retry_after
+        self._last_run: datetime | None = None
+
+    def open_positions(self, now: datetime) -> list[tuple[Position, Decision]]:
+        with self.p.sf() as s:
+            positions = [x for x in load_positions(s, now, self.p.policy.policy) if x.qty > 0 and x.entry_decision_id]
+            entries = {d.id: d for d in s.scalars(select(Decision).where(
+                Decision.id.in_([x.entry_decision_id for x in positions])))} if positions else {}
+        return [(x, entries[x.entry_decision_id]) for x in positions if x.entry_decision_id in entries]
+
+    def check(self, pos: Position, entry: Decision, now: datetime) -> DecisionContent | None:
+        policy = self.p.policy
+        with self.p.sf() as s:
+            if has_pending_close(s, entry.id):
+                return None
+            last = last_close_at(s, entry.id)
+        if last is not None and now - last < self.retry_after:
+            return None
+        assert entry.symbol and entry.instrument_id and entry.plan
+        q = self.p.quotes.manage_quote(entry.source_event_id, entry.symbol, entry.instrument_id)
+        if q is None:
+            return None
+        price = exit_price(q, policy.policy)
+        trigger = close_trigger(entry.plan, price, q.observed_at)
+        if trigger is None:
+            return None
+        with self.p.sf() as s:
+            snap = data_snapshot(s, q.observed_at)
+        plan = {"trigger": trigger, "exit_ref": str(price) if price is not None else None,
+                "stop": entry.plan["stop"], "take_profit": entry.plan["take_profit"], "expiry": entry.plan["expiry"]}
+        c = DecisionContent(kind="close", source_event_id=entry.source_event_id, instrument_id=entry.instrument_id,
+                            symbol=entry.symbol, cluster_id=entry.cluster_id, outcome=Outcome.trade, reasons=(trigger,),
+                            side=Side.sell, qty=int(pos.qty), quote=q.as_json(), exposure={}, plan=plan,
+                            expected_cost_bps=None, spread_unverified=policy.policy.spread_unverified,
+                            hypothetical=None, decided_at=q.observed_at,
+                            versions=Versions(self.p.code_sha, policy.hash, self.p.models.prompt_version,
+                                              self.p.models.model_id, snap),
+                            parent_source_event_id=entry.source_event_id)
+        with self.p.sf() as s, s.begin():
+            s.add(to_row(c, parent_decision_id=entry.id))
+        log("decision_written", kind="close", trigger=trigger, symbol=entry.symbol, qty=int(pos.qty),
+            price=str(price), entry_decision_id=entry.id, content_hash=c.content_hash)
+        return c
+
+    def step(self, force: bool = False) -> int:
+        now = self.p.clock.now()
+        if not force and self._last_run is not None and now - self._last_run < self.every:
+            return 0
+        self._last_run = now
+        if not is_open(self.p.sessions_fn(now), now):
+            return 0
+        with self.p.sf() as s:
+            if load_kill_state(s, now) == KillState.HALT:
+                return 0
+        return sum(1 for pos, entry in self.open_positions(now) if self.check(pos, entry, now) is not None)
 
 
 class AgentProcess:

@@ -25,13 +25,18 @@ from nta.marketcal import roll_forward, session_index_at
 from nta.policy import Policy, SourceKind
 from nta.schema import (
     Decision,
+    DecisionKind,
     Fill,
     KillState,
     KillSwitchEvent,
+    Order,
+    OrderEvent,
     Outcome,
     PositionSnapshot,
     Quote,
     QuoteKind,
+    RiskReview,
+    RiskVerdict,
     Side,
     SignalStatus,
     SourceEvent,
@@ -493,6 +498,26 @@ def to_row(c: DecisionContent, *, signal_id: str | None = None, parent_decision_
                     data_snapshot=c.versions.data_snapshot, content_hash=c.content_hash)
 
 
+# ---------- position management (pure) ----------
+
+def exit_price(q: QuoteView, policy: Policy) -> Decimal | None:
+    """What a long can sell at: the last trade on IEX, the bid on SIP."""
+    if policy.spread_unverified:
+        return q.last
+    return q.bid or q.last
+
+
+def close_trigger(plan: dict[str, Any], price: Decimal | None, now: datetime) -> str | None:
+    """stop / take_profit / expiry for a long position, checked in that order."""
+    if price is not None and price <= Decimal(plan["stop"]):
+        return "stop"
+    if price is not None and price >= Decimal(plan["take_profit"]):
+        return "take_profit"
+    if now >= datetime.fromisoformat(plan["expiry"]):
+        return "expiry"
+    return None
+
+
 # ---------- point-in-time loaders (shared by live and replay) ----------
 
 def quote_view(q: Quote, uncertain: bool = False) -> QuoteView:
@@ -576,3 +601,28 @@ def load_exposure(s: Session, as_of: datetime, policy: Policy) -> Exposure:
 
 def data_snapshot(s: Session, as_of: datetime) -> str | None:
     return s.scalar(select(func.max(SourceEvent.id)).where(SourceEvent.first_observed_at <= as_of))
+
+
+def has_pending_close(s: Session, parent_id: str) -> bool:
+    """A close for this entry is unreviewed, or approved with an order still working."""
+    closes = list(s.scalars(select(Decision.id).where(Decision.parent_decision_id == parent_id,
+                                                      Decision.outcome == Outcome.trade)))
+    for cid in closes:
+        review = s.scalar(select(RiskReview.verdict).where(RiskReview.decision_id == cid))
+        if review is None:
+            return True
+        if review != RiskVerdict.approve:
+            continue
+        oid = s.scalar(select(Order.id).where(Order.decision_id == cid))
+        if oid is None:
+            return True
+        done = s.scalar(select(func.count()).select_from(OrderEvent).where(
+            OrderEvent.order_id == oid, OrderEvent.event.in_(("terminal", "broker_rejected", "blocked", "hmac_invalid"))))
+        if not done:
+            return True
+    return False
+
+
+def last_close_at(s: Session, parent_id: str) -> datetime | None:
+    return s.scalar(select(func.max(Decision.decided_at)).where(Decision.parent_decision_id == parent_id,
+                                                                Decision.kind == DecisionKind.close))

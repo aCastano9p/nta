@@ -239,7 +239,7 @@ def agent_cmd(
 
     import httpx
 
-    from nta.agent import AgentProcess, LiveQuotes, Pipeline
+    from nta.agent import AgentProcess, LiveQuotes, Pipeline, PositionManager
     from nta.alpaca import AlpacaData
     from nta.clock import SystemClock
     from nta.config import ConfigError, alpaca_credentials, anthropic_api_key, assert_agent_env
@@ -278,7 +278,9 @@ def agent_cmd(
             quotes = LiveQuotes(sf, alpaca, clock)
             pipeline = Pipeline(sf=sf, clock=clock, gateway=gateway, models=models, policy=loaded, quotes=quotes,
                                 code_sha=code_sha())
-            proc = AgentProcess(pipeline, clock, run_id=run_id, lookback=timedelta(hours=lookback_h))
+            manager = PositionManager(pipeline)
+            proc = AgentProcess(pipeline, clock, run_id=run_id, lookback=timedelta(hours=lookback_h),
+                                manager=manager.step)
             if once:
                 proc.tick()
             else:

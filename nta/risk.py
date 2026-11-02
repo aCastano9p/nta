@@ -34,6 +34,7 @@ from nta.decide import (
     DecisionContent,
     QuoteView,
     Versions,
+    has_pending_close,
     load_kill_state,
     load_positions,
     reference_price,
@@ -114,26 +115,6 @@ def open_incidents(s: Session) -> list[Incident]:
 
 def write_kill(s: Session, state: KillState, actor: str, reason: str, at: datetime, incident_id: str | None = None) -> None:
     s.add(KillSwitchEvent(state=state, actor=actor, reason=reason, at=at, incident_id=incident_id))
-
-
-def has_pending_close(s: Session, parent_id: str) -> bool:
-    """A close for this entry is unreviewed, or approved with an order still working."""
-    closes = list(s.scalars(select(Decision.id).where(Decision.parent_decision_id == parent_id,
-                                                      Decision.outcome == Outcome.trade)))
-    for cid in closes:
-        review = s.scalar(select(RiskReview.verdict).where(RiskReview.decision_id == cid))
-        if review is None:
-            return True
-        if review != RiskVerdict.approve:
-            continue
-        oid = s.scalar(select(Order.id).where(Order.decision_id == cid))
-        if oid is None:
-            return True
-        done = s.scalar(select(func.count()).select_from(OrderEvent).where(
-            OrderEvent.order_id == oid, OrderEvent.event.in_(("terminal", "broker_rejected", "blocked", "hmac_invalid"))))
-        if not done:
-            return True
-    return False
 
 
 class RiskService:

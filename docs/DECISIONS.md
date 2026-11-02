@@ -183,3 +183,11 @@ Spec: [phase1-brief.md](phase1-brief.md). Same rules as above: newest at the bot
 - **Watchdog (every 30 s):** account D's positions and open orders via the paper trading API with D's keys; a `position_snapshots` row with `account = 'D'`; anything there = incident `account_d_activity`, severity 1, + PAUSE (actor `watchdog`).
 - **`/healthz` (127.0.0.1:8768)** lists the kill switch state and open incidents and answers 503 while any incident is open or before the first reconcile, in addition to the usual staleness rule. `HealthServer` gained an optional `unhealthy` flag for this.
 - **Quantities in snapshots are normalized strings** (`"49"`, not `"49.000000"`).
+
+## Position manager (inside nta agent)
+- **Open positions come from fills** (`load_positions`, the same loader the decision engine uses), each attributed to its entry decision, whose plan holds stop, take-profit and expiry.
+- **Every 5 s during market hours**, for each open position without a pending close, the agent fetches a snapshot from account D's feed (stored as quote kind `manage`) and checks, in order: price <= stop -> `stop`, price >= take-profit -> `take_profit`, quote time >= expiry -> `expiry`. Exit price = last trade on IEX, bid on SIP.
+- **A trigger writes a close decision** (kind `close`, outcome `trade`, reason = the trigger, qty = the position, quote and trigger price recorded, same version tuple as entries) with `parent_decision_id` = the entry. nta risk reviews and executes it like any order, capping the quantity at what is actually held.
+- **Kill switch:** the manager keeps running in PAUSE and FLATTEN (FLATTEN's own close decisions count as pending, so the manager does not double them) and stands down in HALT, where nta risk would refuse closes anyway.
+- **Outside market hours nothing is checked:** a close could not fill, and an expiry that passes overnight fires at the next open.
+- **Retry:** if a close is rejected or its order dies unfilled, the manager writes a new close decision for the position after 60 s, not every tick.
