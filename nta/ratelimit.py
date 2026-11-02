@@ -46,3 +46,8 @@ def sec_bucket(clock: Clock) -> TokenBucket:
 def openfigi_bucket(clock: Clock) -> TokenBucket:
     """OpenFIGI without a key allows 25 requests per 60 s. 5 + 20/60 s <= 25 per window."""
     return TokenBucket(rate=20 / 60, capacity=5.0, clock=clock)
+
+
+def alpaca_bucket(clock: Clock) -> TokenBucket:
+    """Alpaca free data plan allows 200 requests/min. 10 + 170/60 s keeps 60 s windows <= 180."""
+    return TokenBucket(rate=170 / 60, capacity=10.0, clock=clock)

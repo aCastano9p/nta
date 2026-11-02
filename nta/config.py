@@ -28,3 +28,11 @@ def sec_user_agent(env: Mapping[str, str] = os.environ) -> str:
     if value is None:
         raise ConfigError('SEC_USER_AGENT is not set; SEC requires "<name> <email>".')
     return value
+
+
+def alpaca_credentials(env: Mapping[str, str] = os.environ) -> tuple[str, str]:
+    key, secret = env.get("ALPACA_KEY_ID", "").strip(), env.get("ALPACA_SECRET", "").strip()
+    placeholders = {"", "replace-me"}
+    if key in placeholders or secret in placeholders:
+        raise ConfigError("ALPACA_KEY_ID and ALPACA_SECRET must be set (market data API keys).")
+    return key, secret

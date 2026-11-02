@@ -40,6 +40,14 @@ What to watch in the logs:
 - `filing_stored`: one per stored filing, with `poll_latency_s` (first_observed_at - published_at).
 - Crash check: `select r.id, r.started_at from runs r left join run_stops s on s.run_id = r.id where s.id is null;` lists runs that ended without a clean stop.
 
+## Quote recorder
+```sh
+set -a; source .env; set +a     # needs ALPACA_KEY_ID / ALPACA_SECRET (free data plan)
+mkdir -p logs && uv run nta quotes | tee -a logs/quotes.jsonl
+curl -s localhost:8766/healthz  # 200 = ticked within 30 s
+```
+Run it alongside `nta poll edgar`. It schedules observe/mark quotes for every stored filing, records them when due (market hours only), and records a periodic quote for every allowlisted ticker every 5 minutes. Stop with Ctrl-C / SIGTERM; restarts lose nothing (the schedule is in `quote_schedule`).
+
 ## Tests
 ```sh
 docker compose up -d
@@ -63,6 +71,9 @@ uv run pytest -q              # rebuilds the nta_test database from migrations e
 | `feed_backfill` with `gap_closed: false` | Downtime longer than ~500 filings; some filings were never observed. | Note the gap window; those filings are absent from the dataset (point-in-time: we did not see them). |
 | `/healthz` 503 | No successful poll in 60 s (or not polled yet). | Check the logs for `poll_failed` / `http_retry`; restart if the process is stuck. |
 | Process won't stop after SIGTERM | Waiting on a slow request or backoff. | Wait up to ~1 min, or press Ctrl-C again (after 1 s) to force; a forced stop is recorded as `error KeyboardInterrupt`. |
+| `error: ALPACA_KEY_ID and ALPACA_SECRET must be set` (exit 2) | Quote recorder needs Alpaca data keys. | Put both in `.env`. |
+| `quote_missing` | Alpaca returned no usable quote or trade for a symbol. | Retried every 5 s automatically. If it persists for one ticker, check the ticker exists on IEX (`alpaca_symbol` turns BRK/B into BRK.B). |
+| `quotes_tick_failed` | A tick failed (Alpaca down, bad keys -> 401/403, DB down). | Ticks continue every 0.5 s; `/healthz` on 8766 turns 503 after 30 s. A 401/403 means wrong keys. |
 | `nta db check` exits 1 | Migrations not applied. | `uv run nta db upgrade`. |
 
 ## Dev reset (destroys all data)

@@ -164,3 +164,58 @@ def poll_edgar(
         if health:
             health.stop()
         stop_run(sf, run_id, stop.reason, clock)
+
+
+@app.command("quotes")
+def quotes_cmd(
+    tick: float = typer.Option(0.5, help="Seconds between scheduler ticks."),
+    health_port: int = typer.Option(8766, help="Port for GET /healthz on 127.0.0.1."),
+    stale_after: float = typer.Option(30.0, help="/healthz returns 503 after this many seconds without a successful tick."),
+    once: bool = typer.Option(False, help="Run one tick and exit (for checks)."),
+) -> None:
+    """Record observe/mark quotes for stored filings and periodic quotes for the allowlist."""
+    import httpx
+
+    from nta.alpaca import ALPACA_DATA_URL, AlpacaData
+    from nta.clock import SystemClock
+    from nta.config import ConfigError, alpaca_credentials
+    from nta.db import make_engine, make_session_factory
+    from nta.health import HealthServer
+    from nta.logs import log
+    from nta.quotes import QuoteRecorder
+    from nta.ratelimit import alpaca_bucket
+    from nta.runs import start_run, stop_run
+    from nta.shutdown import StopFlag, install_signal_handlers
+
+    try:
+        key, secret = alpaca_credentials()
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    clock = SystemClock()
+    sf = make_session_factory(make_engine())
+    config = {"process": "quotes", "data_url": ALPACA_DATA_URL, "feed": "iex", "tick_s": tick,
+              "periodic_every_s": 300, "rate": "170/min burst 10"}
+    run_id = start_run(sf, "quotes", config, clock)
+    stop = StopFlag()
+    install_signal_handlers(stop)
+    health = None
+    try:
+        with httpx.Client(timeout=httpx.Timeout(5.0, connect=3.0)) as http:
+            alpaca = AlpacaData(http, alpaca_bucket(clock), clock, key, secret)
+            recorder = QuoteRecorder(session_factory=sf, alpaca=alpaca, clock=clock, run_id=run_id)
+            if once:
+                recorder.tick()
+            else:
+                health = HealthServer(recorder.health, port=health_port,
+                                      stale_after_s=stale_after).start()
+                log("healthz_listening", url=f"http://127.0.0.1:{health.port}/healthz")
+                recorder.run(stop, tick_s=tick)
+    except BaseException as exc:
+        stop.set(f"error {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if health:
+            health.stop()
+        stop_run(sf, run_id, stop.reason, clock)
