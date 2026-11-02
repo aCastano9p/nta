@@ -18,6 +18,28 @@ uv run nta allowlist remove XOM [--as-of 2026-11-02]
 ```
 Set `SEC_USER_AGENT` before loading so CIKs are checked against SEC's ticker list. Re-running a load is safe (no duplicates; OpenFIGI answers come from the DB cache). Rejected rows are printed with a reason and not stored.
 
+## EDGAR poller
+Start (foreground; logs are JSON lines on stdout):
+```sh
+set -a; source .env; set +a
+mkdir -p logs && uv run nta poll edgar | tee -a logs/poll_edgar.jsonl
+```
+Options: `--interval 5`, `--health-port 8765`, `--stale-after 60`, `--max-backfill-pages 5`, `--once` (single poll, then exit).
+
+Stop: Ctrl-C or `kill -TERM <pid>` (or `pkill -TERM -f "nta poll edgar"`). The current poll finishes (worst case: a request timeout of 10 s plus retries), then a `run_stopped` line is logged and a `run_stops` row is written. A second Ctrl-C after 1 s forces exit.
+
+Restart: just start it again. Already-stored filings are never re-stamped. If the poller was down, it reads up to 5 extra feed pages (500 filings) to catch up; filings older than that are missed, and the `feed_backfill` line shows `gap_closed: false`.
+
+Health:
+```sh
+curl -s localhost:8765/healthz      # 200 = polled within 60 s; 503 = stale or never polled
+```
+
+What to watch in the logs:
+- `poll_ok` every ~5 s: `stored`, `duplicate_seen`, `allowlist_size`.
+- `filing_stored`: one per stored filing, with `poll_latency_s` (first_observed_at - published_at).
+- Crash check: `select r.id, r.started_at from runs r left join run_stops s on s.run_id = r.id where s.id is null;` lists runs that ended without a clean stop.
+
 ## Tests
 ```sh
 docker compose up -d
@@ -33,6 +55,14 @@ uv run pytest -q              # rebuilds the nta_test database from migrations e
 | `rejected ... cik_mismatch` / `ticker_not_in_sec_list` | CSV CIK differs from SEC's ticker list. | Fix the CIK in the CSV (SEC's value is in the detail) and reload. |
 | `rejected ... openfigi_error`, or `http_retry` lines for api.openfigi.com | OpenFIGI error or rate limit. | Retried automatically (6 attempts). If it still fails, wait a minute and reload; cached rows are not re-requested. |
 | `allowlist_cik_check_skipped` | `SEC_USER_AGENT` not set. | Set it and reload to verify CIKs. |
+| `error: SEC_USER_AGENT is not set` / `must look like "<name> <email>"` (exit 2) | Poller refuses to start without a valid SEC User-Agent. | Put `SEC_USER_AGENT="Your Name you@example.com"` in `.env` (quoted) and `source` it. |
+| `http_retry` for www.sec.gov with status 429 | SEC throttling. Should not happen at 8 req/s. | Automatic backoff. If persistent, check that only one poller is running (`pgrep -fl "nta poll"`): the rate budget is per process. |
+| `http_retry` with 5xx or `ReadTimeout` / `ConnectError` | SEC or network trouble. | Automatic (6 attempts, jittered backoff). If it keeps failing, `poll_failed` lines follow and `/healthz` turns 503 after 60 s. |
+| `poll_failed` | A whole poll failed after retries (network, DB down, unexpected feed). | Polling continues every 5 s. If it repeats: check network, `docker compose ps`, and the error text. |
+| `filing_fetch_failed` | Index or primary document could not be fetched; the filing was stored without `raw`. | Nothing to do for the measurement (timestamps are kept). Document text is missing for labeling; open the `url` in a browser. |
+| `feed_backfill` with `gap_closed: false` | Downtime longer than ~500 filings; some filings were never observed. | Note the gap window; those filings are absent from the dataset (point-in-time: we did not see them). |
+| `/healthz` 503 | No successful poll in 60 s (or not polled yet). | Check the logs for `poll_failed` / `http_retry`; restart if the process is stuck. |
+| Process won't stop after SIGTERM | Waiting on a slow request or backoff. | Wait up to ~1 min, or press Ctrl-C again (after 1 s) to force; a forced stop is recorded as `error KeyboardInterrupt`. |
 | `nta db check` exits 1 | Migrations not applied. | `uv run nta db upgrade`. |
 
 ## Dev reset (destroys all data)

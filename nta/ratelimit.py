@@ -8,6 +8,9 @@ import threading
 
 from nta.clock import Clock
 
+_EPSILON = 1e-9    # tokens; at most one extra request per 10^9 acquires
+_MIN_WAIT_S = 1e-6  # never ask the clock for a sleep shorter than this
+
 
 class TokenBucket:
     def __init__(self, rate: float, capacity: float, clock: Clock) -> None:
@@ -26,10 +29,12 @@ class TokenBucket:
                 now = self._clock.monotonic()
                 self._tokens = min(self.capacity, self._tokens + (now - self._last) * self.rate)
                 self._last = now
-                if self._tokens >= 1:
+                # Tolerance: float refill can land at 0.9999999999999, whose remaining wait
+                # is too small to move the clock, which would spin forever.
+                if self._tokens >= 1 - _EPSILON:
                     self._tokens -= 1
                     return
-                wait = (1 - self._tokens) / self.rate
+                wait = max((1 - self._tokens) / self.rate, _MIN_WAIT_S)
             self._clock.sleep(wait)
 
 

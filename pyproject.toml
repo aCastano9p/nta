@@ -29,3 +29,4 @@ packages = ["nta"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+faulthandler_timeout = 60  # dump tracebacks if a test hangs

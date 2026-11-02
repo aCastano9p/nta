@@ -33,3 +33,22 @@ Choices the brief left open. Newest at the bottom of each section.
 
 ### Data issue found and fixed (2026-11-01)
 - OpenFIGI maps ticker XOM to **"EXXONMOBIL HOLDINGS CORP" (BBG023CY9MM1)**; the old Exxon Mobil Corp FIGI (BBG000GZQ728) now carries a placeholder ticker. The SEC CIK check confirmed the filer changed: **CIK 0002115436**, not 0000034088. Fixed in the seed CSV; the dev DB row was removed and re-added (both rows kept, append-only). The other 19 seed CIKs matched SEC.
+
+## EDGAR poller
+- **One feed, both forms.** `type=8-K` on `getcurrent` returns 8-K and 8-K/A (and variants like 8-K12B). Stored forms: exactly `8-K` and `8-K/A`; others are ignored and counted as `other_form`.
+- **Co-registrants.** One accession can appear once per filer (e.g. a REIT and its operating partnership). Entries are grouped by accession; the filing is stored if any of its CIKs is allowlisted, under that CIK.
+- **`first_observed_at` = our clock right after the feed response arrives**, one stamp per feed page. The row is inserted after the index and document are fetched (append-only rules out filling `raw` in later). If the process dies in that window (normally under a second), the filing is re-observed on restart with a later stamp. Anything already stored is never re-stamped: it is in the DB-loaded `seen` set, and inserts use `ON CONFLICT DO NOTHING` on (source_id, accession).
+- **Fetch failures still store the observation**, with `raw`/`raw_hash` NULL and a `filing_fetch_failed` log line. Losing the timestamp is worse than missing the document text.
+- **Primary document = first row of the index's "Document Format Files" table whose Type equals the form type** (fallback: any `8-K*` row, then the first .htm/.txt). iXBRL viewer links (`/ix?doc=...`) are unwrapped to the raw document. **Exhibits (e.g. EX-99.1 press releases) are not fetched**, as the brief specifies the primary document; the labeling tool may want them later.
+- **`raw` = the document as fetched (usually HTML), NULs stripped, capped at 2 MB on a UTF-8 boundary.** `raw_hash` = sha256 of the stored text.
+- **Items** = union of the Atom summary's items and the index page's Items block, in that order.
+- **`duplicate_seen`** counts, per poll and cumulatively, feed accessions already processed (stored, skipped as non-allowlisted, or lost an insert race). Logged in every `poll_ok` line and reported by `/healthz`.
+- **Gap backfill.** If page 1 shares no accession with what we have seen, its oldest entry is newer than the newest stored filing, and the page is full, the poller reads further pages (`&start=100`, ...), up to 5 extra. In steady state page 1 always overlaps the previous poll, so this only fires after downtime or bursts of more than 100 8-Ks in 5 s. On an empty DB there is no anchor, so no backfill.
+- **Allowlist is point-in-time by New York date**, refreshed every 60 s.
+- **Poll interval is start-to-start** (5 s): a slow poll shortens the following sleep instead of adding to it.
+- **HTTP timeouts: 10 s read, 5 s connect.** A live feed request once hung for a full read timeout; shorter timeouts keep a stall from delaying polls long.
+- **`/healthz` on 127.0.0.1:8765** (stdlib `http.server`, own thread): JSON with `seconds_since_last_success`, poll counters, `duplicate_seen_total` and `run_id`. 200 if the last successful poll is at most 60 s old, else 503 (also before the first poll).
+- **Runs.** `runs.code_sha` = git HEAD, suffixed `-dirty` if the tree has uncommitted changes. `config_hash` = sha256 of the effective non-secret config, which is also logged in `run_started`. A clean stop or a caught exception writes `run_stops`; a hard kill leaves none.
+- **Signals.** SIGTERM/SIGINT set a lock-free flag; the current poll finishes, then the process exits and writes `run_stops`. Repeated SIGTERMs are ignored (`uv run` forwards SIGTERM, so `pkill -f` delivers two); a second Ctrl-C more than 1 s after the first forces exit. An earlier version called `threading.Event.set()` from the handler and deadlocked in a live test; signal handlers must not take locks.
+- **XML parsing uses stdlib ElementTree** (no extra dependency). Python 3.12's bundled expat (>= 2.4) limits entity expansion, and ElementTree never resolves external entities.
+- **Token bucket tolerance.** A refill can land at 0.9999999999999 tokens, whose remaining wait is too small to move a clock. The bucket treats >= 1 - 1e-9 as a full token and never sleeps less than 1 µs. Found as an intermittent test hang; covered by a regression test.

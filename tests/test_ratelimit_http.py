@@ -121,3 +121,29 @@ def test_transport_error_retried_then_raised() -> None:
     with pytest.raises(httpx.ConnectError):
         send_with_retry(client, req, bucket=sec_bucket(clock), clock=clock, max_attempts=3)
     assert len(clock.sleeps) >= 2
+
+
+class _GuardedClock(FakeClock):
+    """Fails instead of hanging if acquire() spins without the clock moving."""
+
+    def sleep(self, seconds: float) -> None:
+        before = self.t
+        super().sleep(seconds)
+        if self.t == before:
+            raise AssertionError(f"sleep({seconds!r}) did not advance the clock at t={before}")
+
+
+@pytest.mark.parametrize("start", [0.0, 3.0, 1234.5678, 1e6, 1e7])
+def test_bucket_terminates_despite_float_rounding(start: float) -> None:
+    import random as _r
+    rng = _r.Random(42)
+    clock = _GuardedClock()
+    clock.t = start
+    bucket = sec_bucket(clock)
+    times = []
+    for _ in range(3000):
+        if rng.random() < 0.05:
+            clock.advance(rng.random() * 0.37)
+        bucket.acquire()
+        times.append(clock.monotonic())
+    assert max_in_window(times, 1.0) <= 10

@@ -10,6 +10,8 @@ db_app = typer.Typer(no_args_is_help=True, help="Database maintenance.")
 app.add_typer(db_app, name="db")
 allowlist_app = typer.Typer(no_args_is_help=True, help="Manage the instrument allowlist.")
 app.add_typer(allowlist_app, name="allowlist")
+poll_app = typer.Typer(no_args_is_help=True, help="Long-running pollers.")
+app.add_typer(poll_app, name="poll")
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -104,3 +106,61 @@ def allowlist_show(
     for i in rows:
         typer.echo(f"{i.ticker:<8} {i.figi}  {i.cik}  {i.added_on}  {i.name}")
     typer.echo(f"{len(rows)} instruments")
+
+
+@poll_app.command("edgar")
+def poll_edgar(
+    interval: float = typer.Option(5.0, help="Seconds between polls (start to start)."),
+    health_port: int = typer.Option(8765, help="Port for GET /healthz on 127.0.0.1."),
+    stale_after: float = typer.Option(60.0, help="/healthz returns 503 after this many seconds without a successful poll."),
+    max_backfill_pages: int = typer.Option(5, help="Extra feed pages to read when a gap since the last poll is possible."),
+    once: bool = typer.Option(False, help="Poll once and exit (for checks)."),
+) -> None:
+    """Poll the EDGAR 8-K Atom feed and store allowlisted filings."""
+    import httpx
+
+    from nta.clock import SystemClock
+    from nta.config import ConfigError, sec_user_agent
+    from nta.db import make_engine, make_session_factory
+    from nta.edgar import FEED_URL, EdgarPoller
+    from nta.health import HealthServer
+    from nta.logs import log
+    from nta.ratelimit import sec_bucket
+    from nta.runs import start_run, stop_run
+    from nta.shutdown import StopFlag, install_signal_handlers
+
+    try:
+        ua = sec_user_agent()  # fail at startup, before touching anything else
+    except ConfigError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(2) from exc
+
+    clock = SystemClock()
+    sf = make_session_factory(make_engine())
+    config = {"process": "poll_edgar", "feed_url": FEED_URL, "interval_s": interval,
+              "max_backfill_pages": max_backfill_pages, "rate": "8/s burst 2",
+              "forms": ["8-K", "8-K/A"]}
+    run_id = start_run(sf, "poll_edgar", config, clock)
+    stop = StopFlag()
+    install_signal_handlers(stop)
+
+    health = None
+    try:
+        with httpx.Client(timeout=httpx.Timeout(10.0, connect=5.0)) as http:
+            poller = EdgarPoller(http=http, bucket=sec_bucket(clock), clock=clock,
+                                 session_factory=sf, user_agent=ua, run_id=run_id,
+                                 max_backfill_pages=max_backfill_pages)
+            if once:
+                poller.poll_once()
+            else:
+                health = HealthServer(poller.health, port=health_port,
+                                      stale_after_s=stale_after).start()
+                log("healthz_listening", url=f"http://127.0.0.1:{health.port}/healthz")
+                poller.run(stop, interval_s=interval)
+    except BaseException as exc:
+        stop.set(f"error {type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if health:
+            health.stop()
+        stop_run(sf, run_id, stop.reason, clock)
