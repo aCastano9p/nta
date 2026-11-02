@@ -44,8 +44,8 @@ def sec_bucket(clock: Clock) -> TokenBucket:
 
 
 def openfigi_bucket(clock: Clock, keyed: bool = False) -> TokenBucket:
-    """OpenFIGI allows 25 requests per 60 s without a key, 25 per 6 s with one.
-    Capacity 5 + 20 per window keeps every window at <= 25."""
+    """OpenFIGI allows 25 requests per 60 s without a key, 250 per 60 s with one.
+    Capacity 5 + 20 per window (60 s, or 6 s keyed) keeps any 60 s window at <= 25 / <= 205."""
     window = 6.0 if keyed else 60.0
     return TokenBucket(rate=20 / window, capacity=5.0, clock=clock)
 
